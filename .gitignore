@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.spec
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Audio/recording output files
+*.wav
+*.mp3
+*.flac
+*.ogg
+recording_*/
+
+# Transcription output
+transcription_output.txt
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc
+nul

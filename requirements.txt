@@ -1,0 +1,12 @@
+sounddevice
+soundfile
+numpy
+faster-whisper
+webrtcvad
+librosa
+pyannote.audio
+torch
+python-dotenv
+psutil
+pywin32
+pyaudio
