@@ -10,3 +10,8 @@ python-dotenv
 psutil
 pywin32
 pyaudio
+pyaudiowpatch
+pycaw
+comtypes
+customtkinter
+matplotlib

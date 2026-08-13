@@ -16,6 +16,13 @@ venv/
 env/
 .env/
 
+# Environment variables / secrets
+.env
+.env.*
+
+# Claude Code settings (may contain permissions/local config)
+.claude/
+
 # Audio/recording output files
 *.wav
 *.mp3
