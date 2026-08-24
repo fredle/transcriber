@@ -9,10 +9,13 @@ import signal
 import sys
 import json
 from datetime import datetime
+from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 from queue import Queue
 import pyaudiowpatch as pyaudio_wp
 import win32gui
+
+load_dotenv()
 
 # Force UTF-8 output so Whisper's Unicode transcriptions don't crash on Windows
 if hasattr(sys.stdout, 'reconfigure'):
@@ -523,16 +526,12 @@ def _reset_session_globals():
     transcription_thread = None
 
 
-def _run_session(override_mic_id=None, override_loopback_id=None, language=None):
-    global recording, output_file, session_folder, transcription_file, transcription_thread
-    global transcribe_language
-    transcribe_language = language  # None = Whisper auto-detects
-
-    # Detect Teams audio devices
+def _resolve_devices(override_mic_id=None, override_loopback_id=None):
+    """Detect Teams' active mic/speaker devices, applying any manual overrides.
+    Returns (mic_device_id, mic_name, loopback_device_id, loopback_channels, loopback_rate, spk_name)."""
     print("Detecting Teams audio devices...")
     mic_device_id, mic_name, loopback_device_id, loopback_channels, loopback_rate, spk_name = detect_teams_devices()
 
-    # Apply any manual overrides
     if override_mic_id is not None:
         mic_device_id = override_mic_id
         devs = sd.query_devices()
@@ -551,6 +550,16 @@ def _run_session(override_mic_id=None, override_loopback_id=None, language=None)
     print(f"  Mic:     [{mic_device_id}] {mic_name}")
     print(f"  Speaker: [{loopback_device_id}] {spk_name} (WASAPI loopback, {loopback_channels}ch @ {loopback_rate}Hz)")
     print()
+    return mic_device_id, mic_name, loopback_device_id, loopback_channels, loopback_rate, spk_name
+
+
+def _run_session(override_mic_id=None, override_loopback_id=None, language=None):
+    global recording, output_file, session_folder, transcription_file, transcription_thread
+    global transcribe_language
+    transcribe_language = language  # None = Whisper auto-detects
+
+    mic_device_id, mic_name, loopback_device_id, loopback_channels, loopback_rate, spk_name = \
+        _resolve_devices(override_mic_id, override_loopback_id)
 
     # Create session folder
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -740,25 +749,188 @@ def _run_session(override_mic_id=None, override_loopback_id=None, language=None)
     print("SESSION_ENDED", flush=True)
 
 
-def main(override_mic_id=None, override_loopback_id=None, model_size="base", language=None):
-    """Standalone single-shot entry point (direct CLI use): load the model,
-    then run one recording session and exit."""
-    ensure_whisper_loaded(model_size)
-    _reset_session_globals()
-    _run_session(override_mic_id, override_loopback_id, language)
-
-
-def serve(initial_model_size):
+def _run_assemblyai_session(override_mic_id=None, override_loopback_id=None, language=None):
     """
-    Persistent standby mode used by the launcher: preloads the Whisper model
-    immediately, then waits for JSON control lines on stdin so a recording
-    session can start with the model already warm.
+    Realtime engine: stream mic + speaker audio straight to AssemblyAI's
+    Universal-3.5 Pro API (with diarization) instead of local Whisper — no
+    WAV segmenting, no silence detection, transcripts arrive live. Requires
+    ASSEMBLY_AI_TOKEN in .env. Diarized speaker labels (e.g. "Speaker A")
+    are attached to the [OTHER] channel, which typically mixes multiple
+    remote participants; the mic channel is always a single speaker so its
+    label isn't shown.
+    """
+    global session_folder, transcription_file
+
+    api_key = os.environ.get("ASSEMBLY_AI_TOKEN")
+    if not api_key:
+        print("Error: ASSEMBLY_AI_TOKEN not set in .env — cannot use the AssemblyAI engine.", file=sys.stderr)
+        print("SESSION_ENDED", flush=True)
+        return
+
+    from assembly_streaming import AssemblyChannelStreamer
+
+    mic_device_id, mic_name, loopback_device_id, loopback_channels, loopback_rate, spk_name = \
+        _resolve_devices(override_mic_id, override_loopback_id)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_folder = f"recording_{timestamp}"
+    os.makedirs(session_folder, exist_ok=True)
+
+    meeting_title = get_teams_meeting_title()
+    if meeting_title:
+        print(f"  Meeting: {meeting_title}")
+    else:
+        print("  Meeting: (not detected — Teams not open or not in a meeting)")
+    print()
+
+    transcription_filename = os.path.join(session_folder, "transcriptions.jsonl")
+    transcription_file = open(transcription_filename, 'w', encoding='utf-8')
+    transcription_file.write(json.dumps({
+        "session_start": datetime.now().isoformat(),
+        "session_id": timestamp,
+        "type": "session_metadata",
+        "meeting_title": meeting_title,
+        "engine": "assemblyai",
+    }) + "\n")
+    transcription_file.flush()
+
+    def _make_turn_handler(speaker_tag):
+        def _on_final_turn(text, speaker_label, start_ms, end_ms):
+            display_text = f"[{speaker_label}] {text}" if (speaker_tag == "OTHER" and speaker_label) else text
+            print(f"{speaker_tag}: {display_text}")
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "speaker": f"[{speaker_tag}]",
+                "speaker_label": speaker_label,
+                "start_time": round(start_ms / 1000.0, 2),
+                "end_time": round(end_ms / 1000.0, 2),
+                "text": text,
+            }
+            transcription_file.write(json.dumps(entry) + "\n")
+            transcription_file.flush()
+        return _on_final_turn
+
+    mic_streamer = AssemblyChannelStreamer(
+        api_key=api_key, sample_rate=SAMPLE_RATE, label="mic",
+        on_final_turn=_make_turn_handler("ME"),
+    )
+    speaker_streamer = AssemblyChannelStreamer(
+        api_key=api_key, sample_rate=loopback_rate, label="speaker",
+        on_final_turn=_make_turn_handler("OTHER"),
+    )
+
+    print("=" * 60)
+    print("AssemblyAI Realtime Transcriber (Universal-3.5 Pro, diarized)")
+    print("=" * 60)
+    print(f"Session Folder:  {session_folder}")
+    if meeting_title:
+        print(f"Meeting Title:   {meeting_title}")
+    print(f"Mic device:      [{mic_device_id}] {mic_name}")
+    print(f"Speaker device:  [{loopback_device_id}] {spk_name} (WASAPI loopback)")
+    print(f"Language:        {language if language else 'auto-detect (code-switching)'}")
+    print("=" * 60)
+    print("Streaming microphone as [ME] and speaker as [OTHER] to AssemblyAI")
+    print("Press Ctrl+C to stop recording\n")
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    def _mic_callback(indata, frames, time_info, status):
+        if status:
+            print(f"Microphone status: {status}", file=sys.stderr)
+        if recording:
+            mic_streamer.feed((indata * 32767).astype(np.int16).tobytes())
+
+    def _loopback_stream_thread():
+        try:
+            p = pyaudio_wp.PyAudio()
+            stream = p.open(
+                format=pyaudio_wp.paInt16, channels=loopback_channels,
+                rate=loopback_rate, input=True, input_device_index=loopback_device_id,
+                frames_per_buffer=CHUNK_SIZE,
+            )
+        except Exception as e:
+            print(f"Loopback device open failed: {e}", file=sys.stderr)
+            return
+        try:
+            while recording:
+                data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                if loopback_channels > 1:
+                    data = np.frombuffer(data, dtype=np.int16).reshape(-1, loopback_channels)[:, 0].tobytes()
+                speaker_streamer.feed(data)
+        finally:
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+
+    try:
+        mic_streamer.start()
+        speaker_streamer.start()
+
+        loopback_thread = threading.Thread(target=_loopback_stream_thread, daemon=True)
+        loopback_thread.start()
+
+        with sd.InputStream(
+            device=mic_device_id, channels=CHANNELS, samplerate=SAMPLE_RATE,
+            callback=_mic_callback, blocksize=CHUNK_SIZE, latency='high',
+        ) as mic_stream:
+            print("Recording started...")
+            print("Loopback thread active:", loopback_thread.is_alive())
+            print("Microphone stream active:", mic_stream.active)
+            print()
+            while recording:
+                sd.sleep(100)
+
+        loopback_thread.join(timeout=2.0)
+
+    except KeyboardInterrupt:
+        print("\nRecording interrupted by user")
+    except Exception as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("\nStopping AssemblyAI streams (finalizing diarization)...")
+        mic_streamer.stop()
+        speaker_streamer.stop()
+        if transcription_file is not None and not transcription_file.closed:
+            transcription_file.close()
+            print(f"Transcriptions saved to: {transcription_filename}")
+        print(f"\nRecording saved to folder: {session_folder}")
+        print("\nCleanup complete")
+
+    print("SESSION_ENDED", flush=True)
+
+
+def main(override_mic_id=None, override_loopback_id=None, model_size="base", language=None, engine="whisper"):
+    """Standalone single-shot entry point (direct CLI use): run one recording
+    session using the selected engine, then exit."""
+    _reset_session_globals()
+    if engine == "whisper":
+        ensure_whisper_loaded(model_size)
+        _run_session(override_mic_id, override_loopback_id, language)
+    else:
+        _run_assemblyai_session(override_mic_id, override_loopback_id, language)
+
+
+def serve(initial_model_size, engine="whisper"):
+    """
+    Persistent standby mode used by the launcher: for the "whisper" engine,
+    preloads the Whisper model immediately; the "assemblyai" engine has no
+    local model to warm up (transcription runs in AssemblyAI's cloud), so
+    it's ready as soon as the API key is confirmed present. Either way,
+    waits for JSON control lines on stdin so a recording session can start:
       {"cmd": "start", "mic_id": int|null, "loopback_id": int|null, "language": str|null}
       {"cmd": "stop"}   — ends the current session; process stays alive
       {"cmd": "quit"}   — ends any current session and exits
     """
-    print("Standby mode — preloading Whisper model in background...")
-    ensure_whisper_loaded(initial_model_size)
+    if engine == "whisper":
+        print("Standby mode — preloading Whisper model in background...")
+        ensure_whisper_loaded(initial_model_size)
+    else:
+        print("Standby mode — engine=assemblyai, no local model to preload.")
+        if not os.environ.get("ASSEMBLY_AI_TOKEN"):
+            print("Warning: ASSEMBLY_AI_TOKEN not set in .env — recording will fail to start.", file=sys.stderr)
+        print("MODEL_READY", flush=True)
 
     control_queue = Queue()
 
@@ -790,11 +962,18 @@ def serve(initial_model_size):
         if msg is None:
             break
         _reset_session_globals()
-        _run_session(
-            override_mic_id=msg.get("mic_id"),
-            override_loopback_id=msg.get("loopback_id"),
-            language=msg.get("language"),
-        )
+        if engine == "whisper":
+            _run_session(
+                override_mic_id=msg.get("mic_id"),
+                override_loopback_id=msg.get("loopback_id"),
+                language=msg.get("language"),
+            )
+        else:
+            _run_assemblyai_session(
+                override_mic_id=msg.get("mic_id"),
+                override_loopback_id=msg.get("loopback_id"),
+                language=msg.get("language"),
+            )
 
     print("Standby mode exiting.")
 
@@ -806,11 +985,13 @@ if __name__ == "__main__":
     parser.add_argument("--loopback-id", type=int, default=None, help="pyaudiowpatch loopback device ID (overrides auto-detect)")
     parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large"], help="Whisper model size")
     parser.add_argument("--language", default=None, help="Language code e.g. 'en', or omit for auto-detect")
+    parser.add_argument("--engine", default="whisper", choices=["whisper", "assemblyai"],
+                         help="Transcription engine: local faster-whisper, or AssemblyAI realtime streaming with diarization")
     parser.add_argument("--serve", action="store_true",
                          help="Run in persistent standby mode, controlled via JSON lines on stdin (used by launcher.py)")
     args = parser.parse_args()
     if args.serve:
-        serve(args.model)
+        serve(args.model, engine=args.engine)
     else:
         main(override_mic_id=args.mic_id, override_loopback_id=args.loopback_id,
-             model_size=args.model, language=args.language)
+             model_size=args.model, language=args.language, engine=args.engine)

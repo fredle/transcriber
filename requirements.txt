@@ -15,3 +15,5 @@ pycaw
 comtypes
 customtkinter
 matplotlib
+assemblyai
+pillow

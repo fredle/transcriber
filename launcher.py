@@ -28,6 +28,19 @@ ctk.set_default_color_theme("blue")
 
 TRANSCRIBER_SCRIPT = os.path.join(os.path.dirname(__file__), "transcriber.py")
 PYTHON = sys.executable
+APP_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "transcriber.ico")
+RECORDINGS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Windows taskbar grouping: without an explicit AppUserModelID the taskbar
+# inherits the Python interpreter's identity (and its icon), even though the
+# window itself carries ours. Must be set before any window is created.
+try:
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+        "FreddieLeatham.MeetingTranscriber"
+    )
+except Exception:
+    pass
 
 # Chart constants
 CHART_DURATION = 10    # seconds of history to display
@@ -251,6 +264,103 @@ def detect_teams_defaults():
         return None, None
 
 
+# ── Meeting history ──────────────────────────────────────────────────────────
+
+MEETING_LIST_LIMIT = 40
+
+
+def _parse_session_started(meta, folder_name):
+    """Prefer the metadata's session_start; fall back to parsing the folder
+    name (recording_YYYYMMDD_HHMMSS) so folders whose transcript is missing
+    or truncated still sort and display correctly."""
+    raw = (meta or {}).get("session_start")
+    if raw:
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            pass
+    stamp = folder_name[len("recording_"):]
+    try:
+        return datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+
+
+def _read_session_summary(folder_path):
+    """Return (metadata_dict, turn_count) from a recording's transcriptions.jsonl.
+    Returns ({}, 0) when the file is absent or unreadable — a session that
+    crashed before writing still shows up in the list, just without detail."""
+    jsonl = os.path.join(folder_path, "transcriptions.jsonl")
+    if not os.path.isfile(jsonl):
+        return {}, 0
+
+    meta, turns = {}, 0
+    try:
+        with open(jsonl, encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                if i == 0:
+                    try:
+                        first = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if first.get("type") == "session_metadata":
+                        meta = first
+                    else:
+                        turns += 1   # older file with no metadata header
+                else:
+                    turns += 1
+    except OSError:
+        return meta, turns
+    return meta, turns
+
+
+def get_recent_meetings(limit=MEETING_LIST_LIMIT):
+    """List past recording sessions, newest first, for the Recent Meetings panel."""
+    try:
+        entries = os.listdir(RECORDINGS_DIR)
+    except OSError:
+        return []
+
+    meetings = []
+    for name in entries:
+        if not name.startswith("recording_"):
+            continue
+        path = os.path.join(RECORDINGS_DIR, name)
+        if not os.path.isdir(path):
+            continue
+        meta, turns = _read_session_summary(path)
+        meetings.append({
+            "folder": name,
+            "path": path,
+            "title": (meta.get("meeting_title") or "").strip() or "Untitled meeting",
+            "started": _parse_session_started(meta, name),
+            # sessions recorded before the engine switch predate this field
+            "engine": meta.get("engine", "whisper"),
+            "turns": turns,
+        })
+
+    meetings.sort(key=lambda m: m["started"] or datetime.min, reverse=True)
+    return meetings[:limit]
+
+
+def format_meeting_when(started):
+    """Compact, human relative timestamp for a meeting row."""
+    if started is None:
+        return "unknown date"
+    today = datetime.now().date()
+    delta = (today - started.date()).days
+    if delta == 0:
+        return f"Today {started:%H:%M}"
+    if delta == 1:
+        return f"Yesterday {started:%H:%M}"
+    if started.year == datetime.now().year:
+        return f"{started:%d %b %H:%M}"
+    return f"{started:%d %b %Y}"
+
+
 # ── Audio level monitor ───────────────────────────────────────────────────────
 
 class AudioMonitor:
@@ -361,12 +471,18 @@ class AudioMonitor:
 # ── Main UI ───────────────────────────────────────────────────────────────────
 
 class LauncherApp(ctk.CTk):
+    TAB_RECORD = "Record"
+    TAB_MEETINGS = "Recent Meetings"
+
     def __init__(self):
         super().__init__()
         self.title("Meeting Transcriber")
-        self.geometry("1100x820")
-        self.minsize(900, 600)
+        self.geometry("1400x960")
+        self.minsize(1100, 700)
         self.resizable(True, True)
+        if os.path.exists(APP_ICON):
+            self.iconbitmap(APP_ICON)
+            self.after(200, self._reapply_icon)
 
         self._proc              = None   # long-lived transcriber standby/serving process
         self._reader_thread     = None
@@ -374,43 +490,107 @@ class LauncherApp(ctk.CTk):
         self._recording_active  = False
         self._model_ready       = False
         self._spawned_model     = None   # model size the running process was started with
+        self._spawned_engine    = None   # "whisper" or "assemblyai"
+        self._selected_meeting  = None   # meeting shown in the history viewer
 
         self._model_var    = ctk.StringVar(value="base")
         self._language_var = ctk.StringVar(value="Auto-detect")
+        self._engine_var   = ctk.StringVar(value="Whisper (local)")
 
         self._mic_devices      = []   # [(name, sd_id), ...]
         self._loopback_devices = []   # [(name, paw_id, ch, rate), ...]
 
         self._build_ui()
         self._load_devices()
+        self._load_meetings()
         self._schedule_chart_tick()
         self._schedule_call_status_tick()
-        self._spawn_transcriber_process(self._model_var.get())
+        self._spawn_transcriber_process(self._model_var.get(), self._engine_key())
+
+    def _reapply_icon(self):
+        """Force our icon onto the window, including the taskbar button.
+
+        Tk assigns its window *class* icon (the Python logo) and leaves
+        WM_SETICON unset, which is what the Windows taskbar and Alt-Tab read
+        — so iconbitmap alone changes the title bar but not the taskbar.
+        Set the class icon and the window icons explicitly.
+        """
+        try:
+            self.iconbitmap(default=APP_ICON)
+        except Exception:
+            pass
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.GetParent.restype = ctypes.c_void_p
+            user32.GetParent.argtypes = [ctypes.c_void_p]
+            user32.LoadImageW.restype = ctypes.c_void_p
+            user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                          ctypes.c_uint, ctypes.c_int,
+                                          ctypes.c_int, ctypes.c_uint]
+            user32.SendMessageW.restype = ctypes.c_void_p
+            user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                            ctypes.c_void_p, ctypes.c_void_p]
+            # SetClassLongPtrW only exists on 64-bit; 32-bit keeps the old name.
+            set_class = getattr(user32, "SetClassLongPtrW", None) or user32.SetClassLongW
+            set_class.restype = ctypes.c_void_p
+            set_class.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+
+            IMAGE_ICON, LR_LOADFROMFILE, WM_SETICON = 1, 0x0010, 0x0080
+            ICON_SMALL, ICON_BIG = 0, 1
+            GCLP_HICON, GCLP_HICONSM = -14, -34
+
+            # winfo_id() is Tk's inner window; the taskbar tracks its parent.
+            hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+
+            for size, which, class_slot in ((32, ICON_BIG, GCLP_HICON),
+                                            (16, ICON_SMALL, GCLP_HICONSM)):
+                handle = user32.LoadImageW(None, APP_ICON, IMAGE_ICON,
+                                           size, size, LR_LOADFROMFILE)
+                if handle:
+                    user32.SendMessageW(hwnd, WM_SETICON, which, handle)
+                    set_class(hwnd, class_slot, handle)
+        except Exception:
+            pass
 
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
+        """Top-level tabs span the whole window: one for recording, one for
+        browsing past meetings."""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(7, weight=1)   # output row expands
+        self.grid_rowconfigure(0, weight=1)
 
-        pad = {"padx": 20, "pady": (10, 0)}
+        self._tabview = ctk.CTkTabview(self, anchor="nw")
+        self._tabview.grid(row=0, column=0, sticky="nsew", padx=12, pady=(4, 10))
+        self._build_record_tab(self._tabview.add(self.TAB_RECORD))
+        self._build_meetings_tab(self._tabview.add(self.TAB_MEETINGS))
+        self._tabview.set(self.TAB_RECORD)
+
+    # ── Record tab ────────────────────────────────────────────────────────────
+
+    def _build_record_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(7, weight=1, minsize=220)   # output row expands
+
+        pad = {"padx": 8, "pady": (8, 0)}
 
         # ── Teams call status ────────────────────────────────────────────────
         self._call_status_label = ctk.CTkLabel(
-            self, text="○  Checking for a Teams call…",
+            parent, text="○  Checking for a Teams call…",
             font=ctk.CTkFont(size=12, weight="bold"), text_color="#888888",
             anchor="w",
         )
-        self._call_status_label.grid(row=0, column=0, sticky="ew", padx=20, pady=(14, 0))
+        self._call_status_label.grid(row=0, column=0, sticky="ew", padx=8, pady=(4, 0))
 
         # ── Microphone ────────────────────────────────────────────────────────
-        mic_frame = ctk.CTkFrame(self)
+        mic_frame = ctk.CTkFrame(parent)
         mic_frame.grid(row=1, column=0, sticky="ew", **pad)
         mic_frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(mic_frame, text="Microphone  (you)",
                      font=ctk.CTkFont(size=14, weight="bold")
-                     ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+                     ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
         self._teams_mic_label = ctk.CTkLabel(
             mic_frame, text="", font=ctk.CTkFont(size=11), text_color=COL_MIC
         )
@@ -420,16 +600,16 @@ class LauncherApp(ctk.CTk):
             mic_frame, variable=self._mic_var, values=["Loading…"],
             width=600, anchor="w", command=self._on_mic_changed
         )
-        self._mic_menu.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self._mic_menu.grid(row=2, column=0, padx=12, pady=(0, 10), sticky="ew")
 
         # ── Speaker ───────────────────────────────────────────────────────────
-        spk_frame = ctk.CTkFrame(self)
+        spk_frame = ctk.CTkFrame(parent)
         spk_frame.grid(row=2, column=0, sticky="ew", **pad)
         spk_frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(spk_frame, text="Speaker  (others)",
                      font=ctk.CTkFont(size=14, weight="bold")
-                     ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+                     ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 2))
         self._teams_spk_label = ctk.CTkLabel(
             spk_frame, text="", font=ctk.CTkFont(size=11), text_color=COL_SPK
         )
@@ -439,19 +619,19 @@ class LauncherApp(ctk.CTk):
             spk_frame, variable=self._loopback_var, values=["Loading…"],
             width=600, anchor="w", command=self._on_spk_changed
         )
-        self._loopback_menu.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
+        self._loopback_menu.grid(row=2, column=0, padx=12, pady=(0, 10), sticky="ew")
 
         # ── Level chart ───────────────────────────────────────────────────────
-        chart_frame = ctk.CTkFrame(self)
-        chart_frame.grid(row=3, column=0, sticky="ew", padx=20, pady=(10, 0))
+        chart_frame = ctk.CTkFrame(parent)
+        chart_frame.grid(row=3, column=0, sticky="ew", padx=8, pady=(8, 0))
         chart_frame.grid_columnconfigure(0, weight=1)
 
         self._chart_canvas = self._build_chart(chart_frame)
         self._chart_canvas.get_tk_widget().grid(row=0, column=0, sticky="ew", padx=4, pady=4)
 
         # ── Whisper settings ──────────────────────────────────────────────────
-        settings_frame = ctk.CTkFrame(self)
-        settings_frame.grid(row=4, column=0, sticky="ew", padx=20, pady=(10, 0))
+        settings_frame = ctk.CTkFrame(parent)
+        settings_frame.grid(row=4, column=0, sticky="ew", padx=8, pady=(8, 0))
         settings_frame.grid_columnconfigure((0, 1, 2), weight=1)
 
         ctk.CTkLabel(settings_frame, text="Model",
@@ -462,12 +642,7 @@ class LauncherApp(ctk.CTk):
             values=["tiny", "base", "small", "medium", "large"],
             width=120, command=self._on_model_changed,
         )
-        self._model_menu.grid(row=1, column=0, padx=12, pady=(0, 2), sticky="w")
-        self._model_status_label = ctk.CTkLabel(
-            settings_frame, text="○  Loading model…",
-            font=ctk.CTkFont(size=11), text_color="#888888",
-        )
-        self._model_status_label.grid(row=2, column=0, padx=12, pady=(0, 10), sticky="w")
+        self._model_menu.grid(row=1, column=0, padx=12, pady=(0, 10), sticky="w")
 
         ctk.CTkLabel(settings_frame, text="Language",
                      font=ctk.CTkFont(size=12, weight="bold")
@@ -482,30 +657,44 @@ class LauncherApp(ctk.CTk):
             width=160,
         ).grid(row=1, column=1, padx=12, pady=(0, 10), sticky="w")
 
+        ctk.CTkLabel(settings_frame, text="Engine",
+                     font=ctk.CTkFont(size=12, weight="bold")
+                     ).grid(row=0, column=2, sticky="w", padx=12, pady=(8, 2))
+        self._engine_menu = ctk.CTkOptionMenu(
+            settings_frame, variable=self._engine_var,
+            values=["Whisper (local)", "AssemblyAI (cloud, diarized)"],
+            width=200, command=self._on_engine_changed,
+        )
+        self._engine_menu.grid(row=1, column=2, padx=12, pady=(0, 2), sticky="w")
+        self._model_status_label = ctk.CTkLabel(
+            settings_frame, text="○  Loading…",
+            font=ctk.CTkFont(size=11), text_color="#888888",
+        )
+        self._model_status_label.grid(row=2, column=2, padx=12, pady=(0, 10), sticky="w")
+
         # ── Refresh ───────────────────────────────────────────────────────────
         ctk.CTkButton(
-            self, text="↺  Refresh device list", width=200,
+            parent, text="↺  Refresh device list", width=200,
             fg_color="transparent", border_width=1,
             command=self._load_devices
         ).grid(row=5, column=0, pady=(8, 0))
 
         # ── Start / Stop ──────────────────────────────────────────────────────
         self._start_btn = ctk.CTkButton(
-            self, text="▶  Start Recording", height=44,
+            parent, text="▶  Start Recording", height=44,
             font=ctk.CTkFont(size=15, weight="bold"),
             fg_color="#2d6a4f", hover_color="#1b4332",
             command=self._toggle_recording
         )
-        self._start_btn.grid(row=6, column=0, padx=20, pady=12, sticky="ew")
+        self._start_btn.grid(row=6, column=0, padx=8, pady=10, sticky="ew")
 
-        # ── Output ────────────────────────────────────────────────────────────
-        output_container = ctk.CTkFrame(self, fg_color="transparent")
-        output_container.grid(row=7, column=0, sticky="nsew", padx=20, pady=(0, 16))
-        output_container.grid_columnconfigure(0, weight=2)
-        output_container.grid_columnconfigure(1, weight=1)
+        # ── Output: live transcript beside the raw process log ───────────────
+        output_container = ctk.CTkFrame(parent, fg_color="transparent")
+        output_container.grid(row=7, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        output_container.grid_columnconfigure(0, weight=3)
+        output_container.grid_columnconfigure(1, weight=2)
         output_container.grid_rowconfigure(0, weight=1)
 
-        # Live transcription panel — parsed "ME:"/"OTHER:" lines, colour-coded
         transcript_frame = ctk.CTkFrame(output_container)
         transcript_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         transcript_frame.grid_columnconfigure(0, weight=1)
@@ -519,11 +708,8 @@ class LauncherApp(ctk.CTk):
             wrap="word", state="disabled"
         )
         self._transcript_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(2, 8))
-        self._transcript_box.tag_config("me", foreground=COL_MIC)
-        self._transcript_box.tag_config("other", foreground=COL_SPK)
-        self._transcript_box.tag_config("dim", foreground="#888888")
+        self._apply_transcript_tags(self._transcript_box)
 
-        # Raw process log panel — everything the transcriber subprocess prints
         log_frame = ctk.CTkFrame(output_container)
         log_frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         log_frame.grid_columnconfigure(0, weight=1)
@@ -538,11 +724,73 @@ class LauncherApp(ctk.CTk):
         )
         self._output_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(2, 8))
 
-    # ── Chart construction ────────────────────────────────────────────────────
+    # ── Recent meetings tab ───────────────────────────────────────────────────
+
+    def _build_meetings_tab(self, parent):
+        """Master-detail: the meeting list on the left, the selected meeting's
+        transcript on the right, so browsing history never disturbs the live view."""
+        parent.grid_columnconfigure(0, weight=0, minsize=340)
+        parent.grid_columnconfigure(1, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+
+        # ── Left: the list ────────────────────────────────────────────────────
+        list_frame = ctk.CTkFrame(parent)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=(8, 8), pady=8)
+        list_frame.grid_columnconfigure(0, weight=1)
+        list_frame.grid_rowconfigure(1, weight=1)
+
+        list_header = ctk.CTkFrame(list_frame, fg_color="transparent")
+        list_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))
+        list_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(list_header, text="Recent Meetings",
+                     font=ctk.CTkFont(size=13, weight="bold"), anchor="w"
+                     ).grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(
+            list_header, text="↺", width=30, height=24,
+            fg_color="transparent", border_width=1,
+            command=self._load_meetings,
+        ).grid(row=0, column=1, sticky="e")
+
+        self._meetings_list = ctk.CTkScrollableFrame(list_frame, fg_color="transparent")
+        self._meetings_list.grid(row=1, column=0, sticky="nsew", padx=4, pady=(4, 8))
+        self._meetings_list.grid_columnconfigure(0, weight=1)
+
+        # ── Right: the selected meeting's transcript ──────────────────────────
+        view_frame = ctk.CTkFrame(parent)
+        view_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
+        view_frame.grid_columnconfigure(0, weight=1)
+        view_frame.grid_rowconfigure(1, weight=1)
+
+        view_header = ctk.CTkFrame(view_frame, fg_color="transparent")
+        view_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))
+        view_header.grid_columnconfigure(0, weight=1)
+        self._meeting_view_title = ctk.CTkLabel(
+            view_header, text="No meeting selected",
+            font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        )
+        self._meeting_view_title.grid(row=0, column=0, sticky="ew")
+        # Revealed once a meeting is open — opens its folder of wav files
+        self._open_folder_btn = ctk.CTkButton(
+            view_header, text="Open folder", width=110, height=24,
+            fg_color="transparent", border_width=1,
+            command=self._open_selected_meeting_folder,
+        )
+
+        self._meeting_box = ctk.CTkTextbox(
+            view_frame, font=ctk.CTkFont(size=13), wrap="word", state="disabled"
+        )
+        self._meeting_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        self._apply_transcript_tags(self._meeting_box)
+
+    @staticmethod
+    def _apply_transcript_tags(box):
+        box.tag_config("me", foreground=COL_MIC)
+        box.tag_config("other", foreground=COL_SPK)
+        box.tag_config("dim", foreground="#888888")
 
     def _build_chart(self, parent) -> FigureCanvasTkAgg:
-        fig = Figure(figsize=(6.5, 2.2), dpi=96, facecolor=BG_DARK)
-        fig.subplots_adjust(left=0.05, right=0.98, top=0.88, bottom=0.12, hspace=0.55)
+        fig = Figure(figsize=(6.5, 1.5), dpi=96, facecolor=BG_DARK)
+        fig.subplots_adjust(left=0.05, right=0.98, top=0.84, bottom=0.16, hspace=0.95)
 
         x = np.linspace(-CHART_DURATION, 0, CHART_POINTS)
         zeros = np.zeros(CHART_POINTS)
@@ -707,11 +955,20 @@ class LauncherApp(ctk.CTk):
         "Korean": "ko", "Arabic": "ar", "Hindi": "hi",
     }
 
-    def _spawn_transcriber_process(self, model_size):
-        """Launch transcriber.py in --serve (standby) mode so it starts
-        loading the Whisper model immediately, well before Start is clicked."""
-        cmd = [PYTHON, "-u", TRANSCRIBER_SCRIPT, "--serve", "--model", model_size]
-        self._log(f"Starting transcriber (model={model_size})...\n{'─'*60}\n")
+    def _engine_key(self):
+        return "assemblyai" if self._engine_var.get().startswith("AssemblyAI") else "whisper"
+
+    def _spawn_transcriber_process(self, model_size, engine):
+        """Launch transcriber.py in --serve (standby) mode. For the Whisper
+        engine this starts loading the local model immediately, well before
+        Start is clicked; the AssemblyAI engine has no local model to warm
+        up (transcription runs in AssemblyAI's cloud)."""
+        cmd = [PYTHON, "-u", TRANSCRIBER_SCRIPT, "--serve", "--engine", engine]
+        if engine == "whisper":
+            cmd += ["--model", model_size]
+        self._log(f"Starting transcriber (engine={engine}"
+                  + (f", model={model_size}" if engine == "whisper" else "")
+                  + f")...\n{'─'*60}\n")
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -720,7 +977,8 @@ class LauncherApp(ctk.CTk):
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         self._spawned_model = model_size
-        self._model_ready = False
+        self._spawned_engine = engine
+        self._model_ready = (engine != "whisper")  # cloud engine has no load delay
         self._update_model_status_label()
         self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
         self._reader_thread.start()
@@ -749,7 +1007,11 @@ class LauncherApp(ctk.CTk):
             self._log(f"[control] Failed to send {msg.get('cmd')}: {e}\n")
 
     def _update_model_status_label(self):
-        if self._model_ready:
+        if self._spawned_engine != "whisper":
+            self._model_status_label.configure(
+                text="●  AssemblyAI (cloud, diarized)", text_color="#2d9d5f"
+            )
+        elif self._model_ready:
             self._model_status_label.configure(
                 text=f"●  Model ready ({self._spawned_model})", text_color="#2d9d5f"
             )
@@ -762,7 +1024,17 @@ class LauncherApp(ctk.CTk):
         if self._recording_active or value == self._spawned_model:
             return
         self._terminate_transcriber_process()
-        self._spawn_transcriber_process(value)
+        self._spawn_transcriber_process(value, self._spawned_engine)
+
+    def _on_engine_changed(self, _value):
+        engine = self._engine_key()
+        if self._recording_active:
+            return
+        self._model_menu.configure(state=("normal" if engine == "whisper" else "disabled"))
+        if engine == self._spawned_engine:
+            return
+        self._terminate_transcriber_process()
+        self._spawn_transcriber_process(self._model_var.get(), engine)
 
     # ── Recording control ─────────────────────────────────────────────────────
 
@@ -775,7 +1047,7 @@ class LauncherApp(ctk.CTk):
     def _start_recording(self):
         if self._proc is None or self._proc.poll() is not None:
             self._log("[warn] Transcriber process not running — restarting it.\n")
-            self._spawn_transcriber_process(self._model_var.get())
+            self._spawn_transcriber_process(self._model_var.get(), self._engine_key())
 
         mic_id        = self._selected_mic_id()
         loopback_id   = self._selected_loopback_id()
@@ -794,6 +1066,7 @@ class LauncherApp(ctk.CTk):
         self._recording_active = True
         self._start_monitors()
         self._model_menu.configure(state="disabled")
+        self._engine_menu.configure(state="disabled")
         self._start_btn.configure(text="■  Stop Recording",
                                   fg_color="#6b2737", hover_color="#3d0c15")
 
@@ -847,7 +1120,9 @@ class LauncherApp(ctk.CTk):
         self._monitor.stop()
         self._start_btn.configure(text="▶  Start Recording", state="normal",
                                   fg_color="#2d6a4f", hover_color="#1b4332")
-        self._model_menu.configure(state="normal")
+        self._model_menu.configure(state=("normal" if self._spawned_engine == "whisper" else "disabled"))
+        self._engine_menu.configure(state="normal")
+        self._load_meetings()   # the session just written is now a past meeting
 
     def _on_process_crashed(self):
         self._proc = None
@@ -855,9 +1130,10 @@ class LauncherApp(ctk.CTk):
         self._monitor.stop()
         self._start_btn.configure(text="▶  Start Recording", state="normal",
                                   fg_color="#2d6a4f", hover_color="#1b4332")
-        self._model_menu.configure(state="normal")
+        self._model_menu.configure(state=("normal" if self._spawned_engine == "whisper" else "disabled"))
+        self._engine_menu.configure(state="normal")
         self._log("\n── Transcriber process ended unexpectedly — restarting… ──\n")
-        self._spawn_transcriber_process(self._model_var.get())
+        self._spawn_transcriber_process(self._model_var.get(), self._spawned_engine)
 
     # ── Output helper ─────────────────────────────────────────────────────────
 
@@ -885,6 +1161,140 @@ class LauncherApp(ctk.CTk):
         self._transcript_box.configure(state="normal")
         self._transcript_box.delete("1.0", "end")
         self._transcript_box.configure(state="disabled")
+
+    # ── Recent meetings panel ─────────────────────────────────────────────────
+
+    def _load_meetings(self):
+        """(Re)build the Recent Meetings list from the recordings on disk."""
+        for child in self._meetings_list.winfo_children():
+            child.destroy()
+
+        meetings = get_recent_meetings()
+        if not meetings:
+            ctk.CTkLabel(
+                self._meetings_list, text="No recordings yet",
+                font=ctk.CTkFont(size=11), text_color="#888888",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+
+        for row, meeting in enumerate(meetings):
+            self._build_meeting_row(row, meeting)
+
+    def _build_meeting_row(self, row, meeting):
+        """One clickable meeting entry: title on top, details underneath."""
+        card = ctk.CTkFrame(self._meetings_list, fg_color="#2b2b2b", corner_radius=6)
+        card.grid(row=row, column=0, sticky="ew", padx=2, pady=3)
+        card.grid_columnconfigure(0, weight=1)
+
+        engine_colour = COL_SPK if meeting["engine"] == "assemblyai" else COL_MIC
+        engine_label = "AssemblyAI" if meeting["engine"] == "assemblyai" else "Whisper"
+
+        title = ctk.CTkLabel(
+            card, text=meeting["title"], anchor="w", justify="left",
+            font=ctk.CTkFont(size=12, weight="bold"), wraplength=280,
+        )
+        title.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 0))
+
+        detail = ctk.CTkLabel(
+            card, anchor="w", justify="left",
+            text=f"{format_meeting_when(meeting['started'])}  ·  {meeting['turns']} lines",
+            font=ctk.CTkFont(size=10), text_color="#9a9a9a",
+        )
+        detail.grid(row=1, column=0, sticky="ew", padx=8, pady=0)
+
+        engine = ctk.CTkLabel(
+            card, text=engine_label, anchor="w",
+            font=ctk.CTkFont(size=10), text_color=engine_colour,
+        )
+        engine.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+
+        # Bind the whole card (and its labels, which would otherwise swallow
+        # the click) so the entire row is one hit target.
+        widgets = [card, title, detail, engine]
+        for w in widgets:
+            w.bind("<Button-1>", lambda _e, m=meeting: self._show_meeting(m))
+            w.bind("<Enter>", lambda _e, c=card: c.configure(fg_color="#3a3a3a"))
+            w.bind("<Leave>", lambda _e, c=card: c.configure(fg_color="#2b2b2b"))
+            w.configure(cursor="hand2")
+
+    def _show_meeting(self, meeting):
+        """Load a past meeting's transcript into the viewer beside the list."""
+        jsonl = os.path.join(meeting["path"], "transcriptions.jsonl")
+        self._selected_meeting = meeting
+        self._clear_meeting_view()
+        self._meeting_view_title.configure(text=meeting["title"])
+        self._open_folder_btn.grid(row=0, column=1, sticky="e", padx=(6, 0))
+
+        if not os.path.isfile(jsonl):
+            self._append_meeting_note("No transcript file in " + meeting["folder"] + ".")
+            return
+
+        shown = 0
+        try:
+            with open(jsonl, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("type") == "session_metadata":
+                        continue
+                    text = (entry.get("text") or "").strip()
+                    if not text:
+                        continue
+                    speaker = "ME" if entry.get("speaker") == "[ME]" else "OTHER"
+                    label = entry.get("speaker_label")
+                    if speaker == "OTHER" and label and label != "PENDING":
+                        text = f"[{label}] {text}"
+                    stamp = self._format_entry_time(entry.get("timestamp"))
+                    self._append_meeting_line(stamp, speaker, text)
+                    shown += 1
+        except OSError as e:
+            self._append_meeting_note(f"Could not read transcript: {e}")
+            return
+
+        if shown == 0:
+            self._append_meeting_note("This session recorded no speech.")
+
+    def _open_selected_meeting_folder(self):
+        """Reveal the meeting's folder — the wav segments live alongside the transcript."""
+        if not self._selected_meeting:
+            return
+        try:
+            os.startfile(self._selected_meeting["path"])
+        except OSError as e:
+            self._append_meeting_note(f"Could not open folder: {e}")
+
+    @staticmethod
+    def _format_entry_time(raw):
+        if not raw:
+            return "--:--:--"
+        try:
+            return datetime.fromisoformat(raw).strftime("%H:%M:%S")
+        except ValueError:
+            return "--:--:--"
+
+    def _clear_meeting_view(self):
+        self._meeting_box.configure(state="normal")
+        self._meeting_box.delete("1.0", "end")
+        self._meeting_box.configure(state="disabled")
+
+    def _append_meeting_line(self, stamp, speaker, text):
+        """Synchronous write into the history viewer (always on the UI thread)."""
+        tag = "me" if speaker == "ME" else "other"
+        self._meeting_box.configure(state="normal")
+        self._meeting_box.insert("end", f"[{stamp}] ", "dim")
+        self._meeting_box.insert("end", f"{speaker}: ", tag)
+        self._meeting_box.insert("end", text + "\n")
+        self._meeting_box.configure(state="disabled")
+
+    def _append_meeting_note(self, text):
+        self._meeting_box.configure(state="normal")
+        self._meeting_box.insert("end", text + "\n", "dim")
+        self._meeting_box.configure(state="disabled")
 
     # ── Clean shutdown ────────────────────────────────────────────────────────
 
