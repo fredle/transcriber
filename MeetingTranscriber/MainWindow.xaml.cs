@@ -240,14 +240,26 @@ public partial class MainWindow : Window
             return;
         }
         _openMeeting = meeting;
-        _openLines = MeetingStore.ReadTranscript(meeting.Path);
-        TranscriptList.ItemsSource = _openLines;
         ViewerTitle.Text = meeting.Title;
         OpenFolderButton.Visibility = Visibility.Visible;
         DeleteLinesButton.Visibility = Visibility.Collapsed;
 
+        try
+        {
+            _openLines = MeetingStore.ReadTranscript(meeting.Path);
+        }
+        catch (Exception ex)
+        {
+            // Never let a read problem escape into WPF's event plumbing: an
+            // unhandled exception here terminates the process, which would
+            // abandon a recording in progress.
+            _openLines = new List<TranscriptLine>();
+            Log($"Could not read {meeting.Folder}: {ex.Message}");
+        }
+        TranscriptList.ItemsSource = _openLines;
+
         if (_openLines.Count == 0)
-            Log($"{meeting.Folder}: no transcript lines.");
+            Log($"{meeting.Folder}: no transcript lines yet.");
     }
 
     private void ResetViewer()

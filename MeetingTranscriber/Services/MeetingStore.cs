@@ -126,6 +126,22 @@ public static class MeetingStore
         return meetings;
     }
 
+    /// <summary>
+    /// Read a transcript without fighting the writer. A recording in progress
+    /// holds its own transcript open for writing, and the default share mode
+    /// used by File.ReadLines conflicts with that - which previously threw
+    /// straight out of a UI event handler and took the process down.
+    /// </summary>
+    private static IEnumerable<string> ReadLinesShared(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                          FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        string? line;
+        while ((line = reader.ReadLine()) != null)
+            yield return line;
+    }
+
     private static DateTime? ParseFolderStamp(string folder)
     {
         const string prefix = "recording_";
@@ -148,7 +164,7 @@ public static class MeetingStore
         try
         {
             var index = 0;
-            foreach (var raw in File.ReadLines(path))
+            foreach (var raw in ReadLinesShared(path))
             {
                 var line = raw.Trim();
                 if (line.Length == 0) { index++; continue; }
@@ -176,7 +192,7 @@ public static class MeetingStore
         if (!File.Exists(path)) return result;
 
         var index = -1;
-        foreach (var raw in File.ReadLines(path))
+        foreach (var raw in ReadLinesShared(path))
         {
             index++;
             var line = raw.Trim();
@@ -228,7 +244,7 @@ public static class MeetingStore
     public static void DeleteLines(string dir, IEnumerable<int> sourceIndices)
     {
         var path = Path.Combine(dir, TranscriptFileName);
-        var lines = new List<string>(File.ReadAllLines(path));
+        var lines = new List<string>(ReadLinesShared(path));
 
         var ordered = new List<int>(sourceIndices);
         ordered.Sort((a, b) => b.CompareTo(a));
