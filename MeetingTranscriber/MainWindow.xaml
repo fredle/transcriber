@@ -1,0 +1,223 @@
+<Window x:Class="MeetingTranscriber.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Meeting Transcriber" Height="900" Width="1300"
+        MinHeight="640" MinWidth="1000"
+        Background="{StaticResource WindowBg}"
+        TextOptions.TextFormattingMode="Display">
+
+    <TabControl Background="{StaticResource WindowBg}" BorderThickness="0" Margin="8">
+
+        <!-- ── Record ─────────────────────────────────────────────────── -->
+        <TabItem Header="Record">
+            <Grid Margin="8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock x:Name="CallStatus" Grid.Row="0" Margin="4,4,4,10"
+                           FontWeight="SemiBold" Foreground="{StaticResource Dim}"
+                           Text="Checking for a Teams call..."/>
+
+                <!-- Devices -->
+                <Grid Grid.Row="1" Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <Border Grid.Column="0" Background="{StaticResource Panel}"
+                            BorderBrush="{StaticResource Border}" BorderThickness="1"
+                            CornerRadius="6" Padding="12" Margin="0,0,6,0">
+                        <StackPanel>
+                            <TextBlock Text="Microphone  (you)" FontWeight="Bold" FontSize="14"/>
+                            <TextBlock x:Name="MicHint" Foreground="{StaticResource Mic}"
+                                       FontSize="11" Margin="0,4,0,6"/>
+                            <ComboBox x:Name="MicCombo"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Grid.Column="1" Background="{StaticResource Panel}"
+                            BorderBrush="{StaticResource Border}" BorderThickness="1"
+                            CornerRadius="6" Padding="12" Margin="6,0,0,0">
+                        <StackPanel>
+                            <TextBlock Text="Speaker  (others)" FontWeight="Bold" FontSize="14"/>
+                            <TextBlock x:Name="SpkHint" Foreground="{StaticResource Spk}"
+                                       FontSize="11" Margin="0,4,0,6"/>
+                            <ComboBox x:Name="SpeakerCombo"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- Levels -->
+                <Border Grid.Row="2" Background="{StaticResource Panel}"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        CornerRadius="6" Padding="12" Margin="0,0,0,10">
+                    <StackPanel>
+                        <TextBlock Text="Mic" Foreground="{StaticResource Mic}" FontSize="11"/>
+                        <ProgressBar x:Name="MicLevelBar" Height="10" Maximum="1" Margin="0,2,0,8"
+                                     Foreground="{StaticResource Mic}"
+                                     Background="{StaticResource TrackBg}" BorderThickness="0"/>
+                        <TextBlock Text="Speaker" Foreground="{StaticResource Spk}" FontSize="11"/>
+                        <ProgressBar x:Name="SpkLevelBar" Height="10" Maximum="1" Margin="0,2,0,0"
+                                     Foreground="{StaticResource Spk}"
+                                     Background="{StaticResource TrackBg}" BorderThickness="0"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Key + refresh -->
+                <Grid Grid.Row="3" Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="AssemblyAI key" VerticalAlignment="Center"
+                               Margin="4,0,8,0" FontSize="12"/>
+                    <PasswordBox x:Name="ApiKeyBox" Grid.Column="1" VerticalAlignment="Center" Padding="6,4"/>
+                    <Button Grid.Column="2" Content="Save key" Margin="8,0,0,0" Click="OnSaveKey"/>
+                    <Button Grid.Column="3" Content="Refresh devices" Margin="8,0,0,0" Click="OnRefreshDevices"/>
+                </Grid>
+
+                <Button x:Name="RecordButton" Grid.Row="4" Height="44" Margin="0,0,0,10"
+                        Content="Start Recording" FontSize="15" FontWeight="Bold"
+                        Foreground="White" Background="#2D6A4F" BorderBrush="#255B43"
+                        Click="OnToggleRecording"/>
+
+                <!-- Output -->
+                <Grid Grid.Row="5">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="3*"/>
+                        <ColumnDefinition Width="2*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <Border Grid.Column="0" Background="{StaticResource Panel}"
+                            BorderBrush="{StaticResource Border}" BorderThickness="1"
+                            CornerRadius="6" Padding="8" Margin="0,0,6,0">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Text="Live Transcription"
+                                       FontWeight="Bold" Margin="4,0,0,6"/>
+                            <RichTextBox x:Name="LiveTranscript" IsReadOnly="True"
+                                         Background="{StaticResource Panel}"
+                                         Foreground="{StaticResource Fg}"
+                                         BorderThickness="0" FontFamily="Segoe UI" FontSize="13"
+                                         VerticalScrollBarVisibility="Auto"/>
+                        </DockPanel>
+                    </Border>
+
+                    <Border Grid.Column="1" Background="{StaticResource Panel}"
+                            BorderBrush="{StaticResource Border}" BorderThickness="1"
+                            CornerRadius="6" Padding="8" Margin="6,0,0,0">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Text="Log" FontWeight="Bold" Margin="4,0,0,6"/>
+                            <TextBox x:Name="LogBox" IsReadOnly="True"
+                                     Background="{StaticResource Panel}"
+                                     Foreground="{StaticResource Dim}" BorderThickness="0"
+                                     FontFamily="Consolas" FontSize="12"
+                                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+                        </DockPanel>
+                    </Border>
+                </Grid>
+            </Grid>
+        </TabItem>
+
+        <!-- ── Recent Meetings ────────────────────────────────────────── -->
+        <TabItem Header="Recent Meetings">
+            <Grid Margin="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="340"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Background="{StaticResource Panel}"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        CornerRadius="6" Padding="8" Margin="0,0,6,0">
+                    <DockPanel>
+                        <Grid DockPanel.Dock="Top" Margin="4,0,4,8">
+                            <TextBlock Text="Recent Meetings" FontWeight="Bold" FontSize="13"
+                                       VerticalAlignment="Center"/>
+                            <Button Content="Refresh" HorizontalAlignment="Right" Padding="8,3"
+                                    Click="OnRefreshMeetings"/>
+                        </Grid>
+                        <ListBox x:Name="MeetingList" Background="Transparent" BorderThickness="0"
+                                 SelectionChanged="OnMeetingSelected"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                    <Setter Property="Margin" Value="0,2"/>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="{StaticResource PanelAlt}"
+                                            BorderBrush="{StaticResource Border}" BorderThickness="1"
+                                            CornerRadius="6" Padding="8">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="{Binding Title}" FontWeight="Bold"
+                                                           TextWrapping="Wrap"/>
+                                                <TextBlock Text="{Binding Detail}" FontSize="10"
+                                                           Foreground="{StaticResource Dim}" Margin="0,2,0,0"/>
+                                                <TextBlock Text="{Binding EngineLabel}" FontSize="10"
+                                                           Foreground="{StaticResource Spk}" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <Button Grid.Column="1" Content="✕" Width="26" Height="26"
+                                                    VerticalAlignment="Top" Background="Transparent"
+                                                    BorderThickness="0" Foreground="{StaticResource Dim}"
+                                                    ToolTip="Delete this recording"
+                                                    Click="OnDeleteRecording"/>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </Border>
+
+                <Border Grid.Column="1" Background="{StaticResource Panel}"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        CornerRadius="6" Padding="8" Margin="6,0,0,0">
+                    <DockPanel>
+                        <Grid DockPanel.Dock="Top" Margin="4,0,4,8">
+                            <TextBlock x:Name="ViewerTitle" Text="No meeting selected"
+                                       FontWeight="Bold" FontSize="13" VerticalAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="DeleteLinesButton" Content="Delete lines"
+                                        Foreground="{StaticResource Danger}" Padding="8,3"
+                                        Visibility="Collapsed" Click="OnDeleteLines"/>
+                                <Button x:Name="OpenFolderButton" Content="Open folder" Margin="6,0,0,0"
+                                        Padding="8,3" Visibility="Collapsed" Click="OnOpenFolder"/>
+                            </StackPanel>
+                        </Grid>
+                        <ListBox x:Name="TranscriptList" Background="{StaticResource Panel}"
+                                 BorderThickness="0" SelectionMode="Extended" FontSize="13"
+                                 SelectionChanged="OnTranscriptSelectionChanged"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Display}" TextWrapping="Wrap"/>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </Border>
+            </Grid>
+        </TabItem>
+    </TabControl>
+</Window>

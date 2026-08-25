@@ -46,3 +46,9 @@ desktop.ini
 
 # Misc
 nul
+
+# .NET build output
+[Bb]in/
+[Oo]bj/
+dist/
+*.user
