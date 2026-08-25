@@ -17,6 +17,7 @@ import psutil
 import win32gui
 import win32process
 from datetime import datetime
+from tkinter import messagebox
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
@@ -346,6 +347,29 @@ def get_recent_meetings(limit=MEETING_LIST_LIMIT):
     return meetings[:limit]
 
 
+def move_to_recycle_bin(path):
+    """Delete a file or folder to the Recycle Bin rather than permanently, so
+    a mistaken delete is recoverable from Explorer.
+    Returns (ok, error_message)."""
+    try:
+        from win32com.shell import shell, shellcon
+    except ImportError as e:
+        return False, f"pywin32 unavailable ({e})"
+    try:
+        result, aborted = shell.SHFileOperation((
+            0, shellcon.FO_DELETE, os.path.abspath(path), None,
+            shellcon.FOF_ALLOWUNDO | shellcon.FOF_NOCONFIRMATION | shellcon.FOF_SILENT,
+            None, None,
+        ))
+    except Exception as e:
+        return False, str(e)
+    if aborted:
+        return False, "cancelled by the shell"
+    if result != 0:
+        return False, f"shell error code {result}"
+    return True, None
+
+
 def format_meeting_when(started):
     """Compact, human relative timestamp for a meeting row."""
     if started is None:
@@ -492,6 +516,10 @@ class LauncherApp(ctk.CTk):
         self._spawned_model     = None   # model size the running process was started with
         self._spawned_engine    = None   # "whisper" or "assemblyai"
         self._selected_meeting  = None   # meeting shown in the history viewer
+        self._meeting_jsonl     = None   # transcript file backing that viewer
+        self._row_source_lines  = {}     # viewer line -> .jsonl line index
+        self._selected_rows     = set()  # viewer lines picked for deletion
+        self._anchor_row        = None   # shift-click range anchor
 
         self._model_var    = ctk.StringVar(value="base")
         self._language_var = ctk.StringVar(value="Auto-detect")
@@ -769,6 +797,13 @@ class LauncherApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
         )
         self._meeting_view_title.grid(row=0, column=0, sticky="ew")
+        # Revealed once a row is selected — deletes that single transcript line
+        self._delete_row_btn = ctk.CTkButton(
+            view_header, text="Delete line", width=100, height=24,
+            fg_color="transparent", border_width=1,
+            text_color="#e06c75", hover_color="#4a2228",
+            command=self._delete_selected_rows,
+        )
         # Revealed once a meeting is open — opens its folder of wav files
         self._open_folder_btn = ctk.CTkButton(
             view_header, text="Open folder", width=110, height=24,
@@ -781,6 +816,16 @@ class LauncherApp(ctk.CTk):
         )
         self._meeting_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 8))
         self._apply_transcript_tags(self._meeting_box)
+        self._meeting_box.tag_config("rowsel", background="#3a4a63")
+        # Click to pick lines (Ctrl toggles, Shift extends); Delete removes them.
+        self._meeting_box.bind("<Button-1>", self._on_meeting_box_click)
+        self._meeting_box.bind("<Control-Button-1>",
+                               lambda e: self._on_meeting_box_click(e, "toggle"))
+        self._meeting_box.bind("<Shift-Button-1>",
+                               lambda e: self._on_meeting_box_click(e, "range"))
+        self._meeting_box.bind("<Delete>", lambda _e: self._delete_selected_rows())
+        self._meeting_box.bind("<Control-a>", lambda _e: self._select_all_rows())
+        self._meeting_box.bind("<Control-A>", lambda _e: self._select_all_rows())
 
     @staticmethod
     def _apply_transcript_tags(box):
@@ -1109,11 +1154,29 @@ class LauncherApp(ctk.CTk):
 
     def _route_control_line(self, line):
         text = line.strip()
-        if text == "MODEL_READY":
+        if text.startswith("NEW_SESSION "):
+            folder = text.split(" ", 1)[1]
+            self.after(0, lambda: self._on_new_session(folder))
+        elif text == "MODEL_READY":
             self._model_ready = True
             self.after(0, self._update_model_status_label)
         elif text == "SESSION_ENDED":
             self.after(0, self._on_session_ended)
+
+    def _on_new_session(self, folder):
+        """The transcriber rolled into a new recording because the Teams
+        meeting changed. Mark the break in the live view and pick up the
+        newly created meeting in the history list."""
+        self._transcript_divider(f"New meeting — recording into {folder}")
+        self._load_meetings()
+
+    def _transcript_divider(self, label):
+        def _do():
+            self._transcript_box.configure(state="normal")
+            self._transcript_box.insert("end", f"\n── {label} ──\n", "dim")
+            self._transcript_box.see("end")
+            self._transcript_box.configure(state="disabled")
+        self.after(0, _do)
 
     def _on_session_ended(self):
         self._recording_active = False
@@ -1191,7 +1254,7 @@ class LauncherApp(ctk.CTk):
 
         title = ctk.CTkLabel(
             card, text=meeting["title"], anchor="w", justify="left",
-            font=ctk.CTkFont(size=12, weight="bold"), wraplength=280,
+            font=ctk.CTkFont(size=12, weight="bold"), wraplength=250,
         )
         title.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 0))
 
@@ -1208,10 +1271,18 @@ class LauncherApp(ctk.CTk):
         )
         engine.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
 
+        # Deliberately its own widget in a separate column, so a click to
+        # delete can never be mistaken for a click to open.
+        delete_btn = ctk.CTkButton(
+            card, text="✕", width=26, height=26,
+            fg_color="transparent", hover_color="#4a2228", text_color="#9a9a9a",
+            command=lambda m=meeting: self._confirm_delete_meeting(m),
+        )
+        delete_btn.grid(row=0, column=1, rowspan=3, sticky="ne", padx=(0, 6), pady=6)
+
         # Bind the whole card (and its labels, which would otherwise swallow
         # the click) so the entire row is one hit target.
-        widgets = [card, title, detail, engine]
-        for w in widgets:
+        for w in (card, title, detail, engine):
             w.bind("<Button-1>", lambda _e, m=meeting: self._show_meeting(m))
             w.bind("<Enter>", lambda _e, c=card: c.configure(fg_color="#3a3a3a"))
             w.bind("<Leave>", lambda _e, c=card: c.configure(fg_color="#2b2b2b"))
@@ -1221,9 +1292,16 @@ class LauncherApp(ctk.CTk):
         """Load a past meeting's transcript into the viewer beside the list."""
         jsonl = os.path.join(meeting["path"], "transcriptions.jsonl")
         self._selected_meeting = meeting
+        self._meeting_jsonl = jsonl
+        # Maps a display line number in the viewer to its line index in the
+        # .jsonl, so deleting a row edits exactly the right source line.
+        self._row_source_lines = {}
+        self._selected_rows = set()
+        self._anchor_row = None
+        self._delete_row_btn.grid_remove()
         self._clear_meeting_view()
         self._meeting_view_title.configure(text=meeting["title"])
-        self._open_folder_btn.grid(row=0, column=1, sticky="e", padx=(6, 0))
+        self._open_folder_btn.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
         if not os.path.isfile(jsonl):
             self._append_meeting_note("No transcript file in " + meeting["folder"] + ".")
@@ -1232,7 +1310,7 @@ class LauncherApp(ctk.CTk):
         shown = 0
         try:
             with open(jsonl, encoding="utf-8") as f:
-                for line in f:
+                for source_index, line in enumerate(f):
                     line = line.strip()
                     if not line:
                         continue
@@ -1250,7 +1328,8 @@ class LauncherApp(ctk.CTk):
                     if speaker == "OTHER" and label and label != "PENDING":
                         text = f"[{label}] {text}"
                     stamp = self._format_entry_time(entry.get("timestamp"))
-                    self._append_meeting_line(stamp, speaker, text)
+                    display_line = self._append_meeting_line(stamp, speaker, text)
+                    self._row_source_lines[display_line] = source_index
                     shown += 1
         except OSError as e:
             self._append_meeting_note(f"Could not read transcript: {e}")
@@ -1258,6 +1337,149 @@ class LauncherApp(ctk.CTk):
 
         if shown == 0:
             self._append_meeting_note("This session recorded no speech.")
+
+    # ── Deleting a whole recording ────────────────────────────────────────────
+
+    def _confirm_delete_meeting(self, meeting):
+        """Delete a recording folder — transcript and wav segments — after
+        confirming. Goes to the Recycle Bin so it can be restored."""
+        ok = messagebox.askyesno(
+            "Delete recording",
+            f"Delete this recording?\n\n"
+            f"{meeting['title']}\n"
+            f"{format_meeting_when(meeting['started'])}  ·  {meeting['turns']} lines\n"
+            f"Folder: {meeting['folder']}\n\n"
+            "The transcript and its audio segments go to the Recycle Bin.",
+            icon="warning", default="no", parent=self,
+        )
+        if not ok:
+            return
+
+        deleted, error = move_to_recycle_bin(meeting["path"])
+        if not deleted:
+            messagebox.showerror(
+                "Delete failed",
+                f"Could not delete {meeting['folder']}:\n\n{error}",
+                parent=self,
+            )
+            return
+
+        self._log(f"Deleted recording {meeting['folder']} (moved to Recycle Bin)\n")
+        # If the viewer was showing it, there is nothing left to show.
+        if self._selected_meeting and self._selected_meeting["path"] == meeting["path"]:
+            self._reset_meeting_view()
+        self._load_meetings()
+
+    def _reset_meeting_view(self):
+        self._selected_meeting = None
+        self._meeting_jsonl = None
+        self._row_source_lines = {}
+        self._selected_rows = set()
+        self._anchor_row = None
+        self._clear_meeting_view()
+        self._meeting_view_title.configure(text="No meeting selected")
+        self._open_folder_btn.grid_remove()
+        self._delete_row_btn.grid_remove()
+
+    # ── Deleting transcript lines (single or multi-select) ────────────────────
+
+    def _on_meeting_box_click(self, event, mode="set"):
+        """Pick transcript lines. Plain click selects one, Ctrl+click toggles
+        one, Shift+click extends a range from the anchor — the usual list
+        conventions. Returns "break" so Tk's own text selection does not fight
+        our row highlight."""
+        self._meeting_box.focus_set()
+        if not self._row_source_lines:
+            return "break"
+        line = int(self._meeting_box.index(f"@{event.x},{event.y}").split(".")[0])
+        if line not in self._row_source_lines:
+            return "break"
+
+        if mode == "toggle":
+            self._selected_rows.symmetric_difference_update({line})
+            self._anchor_row = line
+        elif mode == "range" and self._anchor_row is not None:
+            lo, hi = sorted((self._anchor_row, line))
+            self._selected_rows = {n for n in self._row_source_lines if lo <= n <= hi}
+        else:
+            self._selected_rows = {line}
+            self._anchor_row = line
+
+        self._refresh_row_selection()
+        return "break"
+
+    def _refresh_row_selection(self):
+        """Repaint the highlight and keep the delete button in step."""
+        self._meeting_box.tag_remove("rowsel", "1.0", "end")
+        for line in self._selected_rows:
+            self._meeting_box.tag_add("rowsel", f"{line}.0", f"{line}.end+1c")
+
+        count = len(self._selected_rows)
+        if count:
+            label = "Delete line" if count == 1 else f"Delete {count} lines"
+            self._delete_row_btn.configure(text=label)
+            self._delete_row_btn.grid(row=0, column=1, sticky="e", padx=(6, 0))
+        else:
+            self._delete_row_btn.grid_remove()
+
+    def _select_all_rows(self):
+        if not self._row_source_lines:
+            return "break"
+        self._selected_rows = set(self._row_source_lines)
+        self._refresh_row_selection()
+        return "break"
+
+    def _delete_selected_rows(self):
+        """Remove every selected line from the meeting's transcriptions.jsonl."""
+        if not self._selected_rows or not self._meeting_jsonl:
+            return
+        targets = sorted(self._selected_rows)
+        source_indices = [self._row_source_lines[n] for n in targets
+                          if n in self._row_source_lines]
+        if not source_indices:
+            return
+
+        preview_lines = []
+        for line in targets[:5]:
+            text = self._meeting_box.get(f"{line}.0", f"{line}.end").strip()
+            preview_lines.append(text[:97] + "…" if len(text) > 100 else text)
+        if len(targets) > 5:
+            preview_lines.append(f"…and {len(targets) - 5} more")
+
+        count = len(source_indices)
+        heading = "Delete this transcript line?" if count == 1 else f"Delete {count} transcript lines?"
+        if not messagebox.askyesno(
+            "Delete lines",
+            heading + "\n\n" + "\n".join(preview_lines)
+            + "\n\nThis edits the saved transcript and cannot be undone.",
+            icon="warning", default="no", parent=self,
+        ):
+            return
+
+        try:
+            with open(self._meeting_jsonl, encoding="utf-8") as f:
+                lines = f.readlines()
+            if any(not 0 <= i < len(lines) for i in source_indices):
+                raise IndexError("transcript changed on disk")
+            # Highest index first, so each removal cannot shift the next one.
+            for index in sorted(source_indices, reverse=True):
+                del lines[index]
+            # Write to a sibling temp file then swap, so an interrupted write
+            # cannot leave a half-truncated transcript behind.
+            tmp = self._meeting_jsonl + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.writelines(lines)
+            os.replace(tmp, self._meeting_jsonl)
+        except (OSError, IndexError) as e:
+            messagebox.showerror("Delete failed",
+                                 f"Could not update the transcript:\n\n{e}",
+                                 parent=self)
+            return
+
+        self._log(f"Deleted {count} transcript line(s) from "
+                  f"{self._selected_meeting['folder']}\n")
+        self._show_meeting(self._selected_meeting)   # re-render from the edited file
+        self._load_meetings()                        # list line counts are now stale
 
     def _open_selected_meeting_folder(self):
         """Reveal the meeting's folder — the wav segments live alongside the transcript."""
@@ -1283,13 +1505,16 @@ class LauncherApp(ctk.CTk):
         self._meeting_box.configure(state="disabled")
 
     def _append_meeting_line(self, stamp, speaker, text):
-        """Synchronous write into the history viewer (always on the UI thread)."""
+        """Synchronous write into the history viewer (always on the UI thread).
+        Returns the display line number the row was written to."""
         tag = "me" if speaker == "ME" else "other"
         self._meeting_box.configure(state="normal")
+        display_line = int(self._meeting_box.index("end-1c").split(".")[0])
         self._meeting_box.insert("end", f"[{stamp}] ", "dim")
         self._meeting_box.insert("end", f"{speaker}: ", tag)
         self._meeting_box.insert("end", text + "\n")
         self._meeting_box.configure(state="disabled")
+        return display_line
 
     def _append_meeting_note(self, text):
         self._meeting_box.configure(state="normal")

@@ -7,6 +7,7 @@ import soundfile as sf
 import threading
 import signal
 import sys
+import time
 import json
 from datetime import datetime
 from dotenv import load_dotenv
@@ -283,6 +284,172 @@ def transcribe_audio_file(audio_filepath):
         print(f"Error transcribing {audio_filepath}: {e}")
 
 
+# ── Meeting rollover ─────────────────────────────────────────────────────────
+# Teams window titles change when you leave one meeting and join another. While
+# recording we watch for that and start a fresh recording folder, so two
+# back-to-back meetings do not end up in one transcript.
+
+TITLE_POLL_SECONDS = 4.0
+TITLE_STABLE_POLLS = 2      # a new title must persist this many polls to count
+
+session_lock = threading.Lock()
+current_meeting_title = None
+transcription_filename = None
+
+
+class _RollMarker:
+    """Queue sentinel telling the worker to switch transcripts.
+
+    Ordering is the point: segments queued before the marker still belong to
+    the previous meeting, so they must be written to the previous transcript.
+    Putting the switch through the same FIFO guarantees that, where swapping a
+    global underneath the worker would misfile whatever was still in flight.
+    """
+
+    def __init__(self, handle, filename, folder):
+        self.handle = handle
+        self.filename = filename
+        self.folder = folder
+
+
+def _open_session(title, engine=None):
+    """Create a recording folder and its transcript, seeded with metadata.
+    Returns (folder, file_handle, filename)."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    folder = f"recording_{stamp}"
+    # Two rollovers inside the same second would otherwise collide.
+    suffix = 1
+    while os.path.exists(folder):
+        suffix += 1
+        folder = f"recording_{stamp}_{suffix}"
+    os.makedirs(folder, exist_ok=True)
+
+    filename = os.path.join(folder, "transcriptions.jsonl")
+    handle = open(filename, "w", encoding="utf-8")
+    entry = {
+        "session_start": datetime.now().isoformat(),
+        "session_id": folder[len("recording_"):],
+        "type": "session_metadata",
+        "meeting_title": title,
+    }
+    if engine:
+        entry["engine"] = engine
+    handle.write(json.dumps(entry) + "\n")
+    handle.flush()
+    return folder, handle, filename
+
+
+def _title_watcher(on_change):
+    """Poll the Teams meeting title while recording and report real changes.
+
+    Ignores empty titles: Teams reports nothing during transitions and when
+    its window is closed, and treating that as a change would spawn junk
+    sessions. A new title must also hold steady for a couple of polls before
+    it counts, so a transient title does not split a meeting in two.
+    """
+    pending, pending_count = None, 0
+    while recording:
+        for _ in range(int(TITLE_POLL_SECONDS * 10)):
+            if not recording:
+                return
+            time.sleep(0.1)
+
+        title = get_teams_meeting_title()
+        if not title or title == current_meeting_title:
+            pending, pending_count = None, 0
+            continue
+
+        if title == pending:
+            pending_count += 1
+        else:
+            pending, pending_count = title, 1
+
+        if pending_count >= TITLE_STABLE_POLLS:
+            pending, pending_count = None, 0
+            try:
+                on_change(title)
+            except Exception as e:
+                print(f"Meeting rollover failed: {e}", file=sys.stderr)
+
+
+def _close_and_enqueue_segments():
+    """Close the in-progress wav segments and queue them for transcription, so
+    audio captured before a switch is transcribed into the meeting it belongs
+    to. Leaves both handles as None for create_new_*_file() to reopen."""
+    global mic_output_file, speaker_output_file
+
+    if mic_output_file is not None and not mic_output_file.closed:
+        name = mic_output_file.name
+        mic_output_file.close()
+        if mic_has_speech:
+            transcription_queue.put(name)
+        else:
+            try:
+                os.remove(name)
+            except OSError:
+                pass
+    mic_output_file = None
+
+    if speaker_output_file is not None and not speaker_output_file.closed:
+        name = speaker_output_file.name
+        speaker_output_file.close()
+        if speaker_has_speech:
+            transcription_queue.put(name)
+        else:
+            try:
+                os.remove(name)
+            except OSError:
+                pass
+    speaker_output_file = None
+
+
+def _announce_new_session(title, folder):
+    print(f"\n── Meeting changed → {title} ──")
+    print(f"Now recording into: {folder}")
+    print(f"NEW_SESSION {folder}", flush=True)
+
+
+def roll_whisper_session(new_title):
+    """Start a new recording folder mid-capture (local Whisper engine)."""
+    global session_folder, current_meeting_title
+    global mic_file_counter, speaker_file_counter
+
+    # Flush what belongs to the outgoing meeting BEFORE the marker.
+    _close_and_enqueue_segments()
+
+    folder, handle, filename = _open_session(new_title)
+    transcription_queue.put(_RollMarker(handle, filename, folder))
+
+    session_folder = folder
+    mic_file_counter = 1
+    speaker_file_counter = 1
+    current_meeting_title = new_title
+    create_new_mic_file()
+    create_new_speaker_file()
+    _announce_new_session(new_title, folder)
+
+
+def roll_assemblyai_session(new_title):
+    """Start a new recording folder mid-stream (AssemblyAI engine).
+
+    No queue here — turn callbacks write straight to the transcript from
+    network threads — so the swap is guarded by session_lock instead.
+    """
+    global session_folder, transcription_file, transcription_filename
+    global current_meeting_title
+
+    folder, handle, filename = _open_session(new_title, "assemblyai")
+    with session_lock:
+        previous = transcription_file
+        transcription_file = handle
+        transcription_filename = filename
+        session_folder = folder
+    if previous is not None and not previous.closed:
+        previous.close()
+    current_meeting_title = new_title
+    _announce_new_session(new_title, folder)
+
+
 def transcription_worker():
     """Worker thread that processes transcription queue"""
     whisper_model_ready.wait()  # Block until model is loaded
@@ -293,6 +460,18 @@ def transcription_worker():
         if audio_filepath is None:
             transcription_queue.task_done()
             break
+
+        # Everything queued before this marker belonged to the previous
+        # meeting and has now been written, so it is safe to switch.
+        if isinstance(audio_filepath, _RollMarker):
+            global transcription_file, transcription_filename
+            previous = transcription_file
+            transcription_file = audio_filepath.handle
+            transcription_filename = audio_filepath.filename
+            if previous is not None and not previous.closed:
+                previous.close()
+            transcription_queue.task_done()
+            continue
 
         try:
             transcribe_audio_file(audio_filepath)
@@ -555,7 +734,7 @@ def _resolve_devices(override_mic_id=None, override_loopback_id=None):
 
 def _run_session(override_mic_id=None, override_loopback_id=None, language=None):
     global recording, output_file, session_folder, transcription_file, transcription_thread
-    global transcribe_language
+    global transcribe_language, transcription_filename, current_meeting_title
     transcribe_language = language  # None = Whisper auto-detects
 
     mic_device_id, mic_name, loopback_device_id, loopback_channels, loopback_rate, spk_name = \
@@ -586,6 +765,8 @@ def _run_session(override_mic_id=None, override_loopback_id=None, language=None)
     }
     transcription_file.write(json.dumps(session_entry) + "\n")
     transcription_file.flush()
+
+    current_meeting_title = meeting_title
 
     # Start transcription worker thread
     transcription_thread = threading.Thread(target=transcription_worker, daemon=False)
@@ -619,6 +800,10 @@ def _run_session(override_mic_id=None, override_loopback_id=None, language=None)
         # Start the save thread
         save_thread = threading.Thread(target=save_thread_function, daemon=True)
         save_thread.start()
+
+        # Watch for the Teams meeting changing under us and roll to a new folder
+        threading.Thread(target=_title_watcher, args=(roll_whisper_session,),
+                         daemon=True).start()
 
         # Start loopback capture thread (WASAPI loopback via pyaudiowpatch)
         loopback_thread = threading.Thread(
@@ -759,7 +944,7 @@ def _run_assemblyai_session(override_mic_id=None, override_loopback_id=None, lan
     remote participants; the mic channel is always a single speaker so its
     label isn't shown.
     """
-    global session_folder, transcription_file
+    global session_folder, transcription_file, transcription_filename, current_meeting_title
 
     api_key = os.environ.get("ASSEMBLY_AI_TOKEN")
     if not api_key:
@@ -794,6 +979,8 @@ def _run_assemblyai_session(override_mic_id=None, override_loopback_id=None, lan
     }) + "\n")
     transcription_file.flush()
 
+    current_meeting_title = meeting_title
+
     def _make_turn_handler(speaker_tag):
         def _on_final_turn(text, speaker_label, start_ms, end_ms):
             display_text = f"[{speaker_label}] {text}" if (speaker_tag == "OTHER" and speaker_label) else text
@@ -806,8 +993,9 @@ def _run_assemblyai_session(override_mic_id=None, override_loopback_id=None, lan
                 "end_time": round(end_ms / 1000.0, 2),
                 "text": text,
             }
-            transcription_file.write(json.dumps(entry) + "\n")
-            transcription_file.flush()
+            with session_lock:
+                transcription_file.write(json.dumps(entry) + "\n")
+                transcription_file.flush()
         return _on_final_turn
 
     mic_streamer = AssemblyChannelStreamer(
@@ -868,6 +1056,10 @@ def _run_assemblyai_session(override_mic_id=None, override_loopback_id=None, lan
 
         loopback_thread = threading.Thread(target=_loopback_stream_thread, daemon=True)
         loopback_thread.start()
+
+        # Watch for the Teams meeting changing under us and roll to a new folder
+        threading.Thread(target=_title_watcher, args=(roll_assemblyai_session,),
+                         daemon=True).start()
 
         with sd.InputStream(
             device=mic_device_id, channels=CHANNELS, samplerate=SAMPLE_RATE,
