@@ -16,10 +16,6 @@ public sealed class TrayIcon : IDisposable
     private readonly ToolStripMenuItem _transcribeItem;
     private readonly ToolStripMenuItem _autoStartItem;
 
-    // What clicking the balloon should do; set fresh by each Notify call and
-    // consumed once so a later, unrelated notification can't fire a stale action.
-    private Action? _pendingClick;
-
     public event Action? ShowRequested;
     public event Action? ToggleTranscribeRequested;
     public event Action? OpenFolderRequested;
@@ -60,13 +56,6 @@ public sealed class TrayIcon : IDisposable
             ContextMenuStrip = menu,
         };
         _icon.DoubleClick += (_, _) => ShowRequested?.Invoke();
-        _icon.BalloonTipClicked += (_, _) =>
-        {
-            var click = _pendingClick;
-            _pendingClick = null;
-            if (click != null) click();
-            else ShowRequested?.Invoke();
-        };
     }
 
     private static Icon LoadAppIcon()
@@ -101,16 +90,18 @@ public sealed class TrayIcon : IDisposable
     }
 
     /// <summary>
-    /// Show a balloon tip. When <paramref name="onClick"/> is given, clicking
-    /// the balloon runs it instead of just reopening the window - e.g. the
-    /// "Teams call detected" prompt starts transcribing right there.
+    /// Show a small, self-dismissing popup near the tray. Windows renders
+    /// NotifyIcon balloon tips as full Action Center toasts and ignores their
+    /// requested timeout, so a custom <see cref="Toast"/> is used instead to
+    /// keep notifications compact and brief. When <paramref name="onClick"/>
+    /// is given, clicking it runs that instead of just reopening the window -
+    /// e.g. the "Teams call detected" prompt starts transcribing right there.
     /// </summary>
     public void Notify(string title, string message, Action? onClick = null)
     {
         try
         {
-            _pendingClick = onClick;
-            _icon.ShowBalloonTip(5000, title, message, ToolTipIcon.Info);
+            new Toast(title, message, onClick ?? ShowRequested).Reveal();
         }
         catch (Exception)
         {
