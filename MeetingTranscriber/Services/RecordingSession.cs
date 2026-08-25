@@ -99,7 +99,7 @@ public sealed class RecordingSession : IAsyncDisposable
         _watcherCts = new CancellationTokenSource();
         _ = Task.Run(() => WatchMeetingTitleAsync(_watcherCts.Token));
 
-        Log?.Invoke($"Recording to {_folder}");
+        Log?.Invoke($"Transcribing to {_folder}");
         Log?.Invoke($"Mic: {_micDevice.Name} @ {micRate} Hz");
         Log?.Invoke($"Speaker: {_speakerDevice.Name} @ {speakerRate} Hz (loopback)");
     }
@@ -286,7 +286,7 @@ public sealed class RecordingSession : IAsyncDisposable
             _writer = null;
         }
         _micLevel = _speakerLevel = 0f;
-        Log?.Invoke("Recording stopped.");
+        Log?.Invoke("Transcribing stopped.");
     }
 
     public async ValueTask DisposeAsync()

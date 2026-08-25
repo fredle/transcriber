@@ -1,8 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace MeetingTranscriber.Services;
 
@@ -14,15 +16,31 @@ public sealed class TranscriptLine
     public required string Text { get; init; }
     public DateTime? Timestamp { get; init; }
 
+    /// <summary>
+    /// Stable identity for this line's speaker within the meeting: "ME", a
+    /// diarised label like "A", or "PENDING" when diarisation hasn't settled
+    /// on one yet. Used both to look up a custom name and as the reassignment
+    /// target when merging a line into an existing speaker.
+    /// </summary>
+    public string SpeakerKey => Speaker == "ME"
+        ? "ME"
+        : string.IsNullOrEmpty(SpeakerLabel) ? "PENDING" : SpeakerLabel;
+
+    /// <summary>Custom name for SpeakerKey, if the user has set one. Populated by MeetingStore.ReadTranscript.</summary>
+    public string? SpeakerName { get; set; }
+
+    private string DefaultSpeakerLabel => Speaker == "ME"
+        ? "Me"
+        : SpeakerKey == "PENDING" ? "Other" : $"Speaker {SpeakerKey}";
+
+    public string SpeakerDisplay => SpeakerName ?? DefaultSpeakerLabel;
+
     public string Display
     {
         get
         {
             var stamp = Timestamp?.ToString("HH:mm:ss") ?? "--:--:--";
-            var body = Speaker == "OTHER" && !string.IsNullOrEmpty(SpeakerLabel) && SpeakerLabel != "PENDING"
-                ? $"[{SpeakerLabel}] {Text}"
-                : Text;
-            return $"[{stamp}] {Speaker}: {body}";
+            return $"[{stamp}] {SpeakerDisplay}: {Text}";
         }
     }
 }
@@ -35,6 +53,10 @@ public sealed class Meeting
     public DateTime? Started { get; init; }
     public required string Engine { get; init; }
     public int Lines { get; init; }
+
+    /// <summary>Name of the organizational folder this meeting lives in, or "" if unfiled.</summary>
+    public string Group { get; init; } = "";
+    public string GroupLabel => Group.Length == 0 ? "Unfiled" : Group;
 
     public string When
     {
@@ -49,7 +71,6 @@ public sealed class Meeting
     }
 
     public string Detail => $"{When}  ·  {Lines} lines";
-    public string EngineLabel => Engine == "assemblyai" ? "AssemblyAI" : "Whisper";
 }
 
 /// <summary>
@@ -60,16 +81,30 @@ public sealed class Meeting
 public static class MeetingStore
 {
     public const string TranscriptFileName = "transcriptions.jsonl";
+    public const string NotesFileName = "notes.rtf";
+    public const string SpeakerNamesFileName = "speakers.json";
 
     private static string? _root;
 
     /// <summary>Where recordings live. Override before first use to relocate.</summary>
     public static string Root
     {
-        get => _root ??= Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "MeetingTranscriber");
+        get => _root ??= ResolveDefaultRoot();
         set => _root = value;
+    }
+
+    /// <summary>
+    /// Documents\Teeline, migrating an older Documents\Kettle or, before
+    /// that, Documents\MeetingTranscriber folder from prior renames so
+    /// existing recordings are never orphaned.
+    /// </summary>
+    private static string ResolveDefaultRoot()
+    {
+        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        var current = Path.Combine(documents, "Teeline");
+        LegacyMigration.MigrateFolder(Path.Combine(documents, "Kettle"), current);
+        LegacyMigration.MigrateFolder(Path.Combine(documents, "MeetingTranscriber"), current);
+        return current;
     }
 
     public static string EnsureRoot()
@@ -83,10 +118,25 @@ public static class MeetingStore
         var meetings = new List<Meeting>();
         if (!Directory.Exists(Root)) return meetings;
 
-        foreach (var dir in Directory.EnumerateDirectories(Root, "recording_*"))
+        CollectMeetings(Root, "", meetings);
+        foreach (var dir in Directory.EnumerateDirectories(Root))
         {
-            var folder = Path.GetFileName(dir);
-            var (meta, lines) = ReadSummary(dir);
+            var name = Path.GetFileName(dir);
+            if (name.StartsWith("recording_", StringComparison.Ordinal)) continue;
+            CollectMeetings(dir, name, meetings);
+        }
+
+        meetings.Sort((a, b) => Nullable.Compare(b.Started, a.Started));
+        if (meetings.Count > limit) meetings.RemoveRange(limit, meetings.Count - limit);
+        return meetings;
+    }
+
+    private static void CollectMeetings(string dir, string group, List<Meeting> meetings)
+    {
+        foreach (var recDir in Directory.EnumerateDirectories(dir, "recording_*"))
+        {
+            var folder = Path.GetFileName(recDir);
+            var (meta, lines) = ReadSummary(recDir);
 
             string title = "Untitled meeting";
             string engine = "whisper";   // predates the engine field
@@ -113,17 +163,61 @@ public static class MeetingStore
             meetings.Add(new Meeting
             {
                 Folder = folder,
-                Path = dir,
+                Path = recDir,
                 Title = title,
                 Started = started,
                 Engine = engine,
                 Lines = lines,
+                Group = group,
             });
         }
+    }
 
-        meetings.Sort((a, b) => Nullable.Compare(b.Started, a.Started));
-        if (meetings.Count > limit) meetings.RemoveRange(limit, meetings.Count - limit);
-        return meetings;
+    /// <summary>Organizational folders under Root, used to group meetings. Does not include recording folders themselves.</summary>
+    public static List<string> GetFolders()
+    {
+        if (!Directory.Exists(Root)) return new List<string>();
+        var folders = new List<string>();
+        foreach (var dir in Directory.EnumerateDirectories(Root))
+        {
+            var name = Path.GetFileName(dir);
+            if (name.StartsWith("recording_", StringComparison.Ordinal)) continue;
+            folders.Add(name);
+        }
+        folders.Sort(StringComparer.CurrentCultureIgnoreCase);
+        return folders;
+    }
+
+    public static void CreateFolder(string name)
+    {
+        name = name.Trim();
+        if (name.Length == 0)
+            throw new ArgumentException("Enter a folder name.");
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            throw new ArgumentException("Folder name contains characters that aren't allowed.");
+        if (name.StartsWith("recording_", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("That name is reserved for recordings.");
+
+        var path = Path.Combine(EnsureRoot(), name);
+        if (Directory.Exists(path))
+            throw new ArgumentException("A folder with that name already exists.");
+        Directory.CreateDirectory(path);
+    }
+
+    /// <summary>Move a recording's folder to an organizational folder ("" moves it back to the root/unfiled).</summary>
+    public static void MoveMeeting(string meetingPath, string targetFolder)
+    {
+        var leaf = Path.GetFileName(meetingPath);
+        var destDir = targetFolder.Length == 0 ? EnsureRoot() : Path.Combine(EnsureRoot(), targetFolder);
+        Directory.CreateDirectory(destDir);
+
+        var destPath = Path.Combine(destDir, leaf);
+        if (string.Equals(Path.GetFullPath(destPath), Path.GetFullPath(meetingPath), StringComparison.OrdinalIgnoreCase))
+            return;
+        if (Directory.Exists(destPath))
+            throw new IOException("A recording with that name already exists there.");
+
+        Directory.Move(meetingPath, destPath);
     }
 
     /// <summary>
@@ -217,7 +311,74 @@ public static class MeetingStore
                 Timestamp = stamp,
             });
         }
+
+        if (result.Count > 0)
+        {
+            var names = LoadSpeakerNames(dir);
+            if (names.Count > 0)
+            {
+                foreach (var line in result)
+                    if (names.TryGetValue(line.SpeakerKey, out var name))
+                        line.SpeakerName = name;
+            }
+        }
         return result;
+    }
+
+    /// <summary>Custom speaker names for a meeting, keyed by TranscriptLine.SpeakerKey.</summary>
+    public static Dictionary<string, string> LoadSpeakerNames(string dir)
+    {
+        var path = Path.Combine(dir, SpeakerNamesFileName);
+        if (!File.Exists(path)) return new Dictionary<string, string>();
+        try
+        {
+            var json = File.ReadAllText(path);
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(json) ?? new Dictionary<string, string>();
+        }
+        catch (Exception ex) when (ex is IOException or JsonException)
+        {
+            return new Dictionary<string, string>();
+        }
+    }
+
+    public static void SaveSpeakerNames(string dir, Dictionary<string, string> names)
+    {
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, SpeakerNamesFileName);
+        var tmp = path + ".tmp";
+        var clean = names
+            .Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
+            .ToDictionary(kv => kv.Key, kv => kv.Value.Trim());
+        File.WriteAllText(tmp, JsonSerializer.Serialize(clean));
+        File.Move(tmp, path, overwrite: true);
+    }
+
+    /// <summary>
+    /// Reassign transcript lines to a different speaker. speakerLabel is null
+    /// for the "ME" channel and the diarised label (e.g. "A") for "OTHER".
+    /// Rewrites only the touched lines' speaker fields, via a temp file so an
+    /// interrupted write cannot leave a half-truncated transcript.
+    /// </summary>
+    public static void SetLineSpeaker(string dir, IEnumerable<int> sourceIndices, string speakerChannel, string? speakerLabel)
+    {
+        var path = Path.Combine(dir, TranscriptFileName);
+        var lines = new List<string>(ReadLinesShared(path));
+
+        foreach (var index in sourceIndices)
+        {
+            if (index < 0 || index >= lines.Count)
+                throw new InvalidOperationException("Transcript changed on disk.");
+
+            var node = JsonNode.Parse(lines[index])?.AsObject()
+                ?? throw new InvalidOperationException("Transcript changed on disk.");
+            node["speaker"] = $"[{speakerChannel}]";
+            node["speaker_label"] = speakerLabel;
+            lines[index] = node.ToJsonString();
+        }
+
+        var tmp = path + ".tmp";
+        File.WriteAllLines(tmp, lines);
+        File.Move(tmp, path, overwrite: true);
     }
 
     private static bool TryParse(string line, out JsonElement element)
@@ -257,6 +418,30 @@ public static class MeetingStore
 
         var tmp = path + ".tmp";
         File.WriteAllLines(tmp, lines);
+        File.Move(tmp, path, overwrite: true);
+    }
+
+    /// <summary>Rich-text notes for a meeting, or null if none have been saved yet.</summary>
+    public static byte[]? LoadNotes(string dir)
+    {
+        var path = Path.Combine(dir, NotesFileName);
+        if (!File.Exists(path)) return null;
+        try { return File.ReadAllBytes(path); }
+        catch (IOException) { return null; }
+    }
+
+    /// <summary>
+    /// Write RTF notes for a meeting, via a temp file so an interrupted write
+    /// can't corrupt them. A meeting whose folder has gone - deleted, or moved
+    /// out from under us - is skipped rather than recreated: creating the
+    /// directory here would resurrect a just-deleted meeting as an empty one.
+    /// </summary>
+    public static void SaveNotes(string dir, byte[] rtfBytes)
+    {
+        if (!Directory.Exists(dir)) return;
+        var path = Path.Combine(dir, NotesFileName);
+        var tmp = path + ".tmp";
+        File.WriteAllBytes(tmp, rtfBytes);
         File.Move(tmp, path, overwrite: true);
     }
 

@@ -15,9 +15,28 @@ public sealed class Settings
     [JsonPropertyName("recordingsRoot")] public string RecordingsRoot { get; set; } = "";
     [JsonPropertyName("micDeviceId")] public string MicDeviceId { get; set; } = "";
     [JsonPropertyName("speakerDeviceId")] public string SpeakerDeviceId { get; set; } = "";
+    /// <summary>Keep running in the notification area when the window is closed.</summary>
+    [JsonPropertyName("minimiseToTray")] public bool MinimiseToTray { get; set; } = true;
+    /// <summary>Begin transcribing by itself when a Teams call starts. Off by
+    /// default: recording a meeting should be a deliberate act.</summary>
+    [JsonPropertyName("autoStartOnCall")] public bool AutoStartOnCall { get; set; }
 
-    private static string Dir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MeetingTranscriber");
+    /// <summary>
+    /// %AppData%\Teeline, migrating an older %AppData%\Kettle or, before
+    /// that, %AppData%\MeetingTranscriber folder so an existing API
+    /// key/settings survive prior renames.
+    /// </summary>
+    private static string Dir
+    {
+        get
+        {
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var current = Path.Combine(appData, "Teeline");
+            LegacyMigration.MigrateFolder(Path.Combine(appData, "Kettle"), current);
+            LegacyMigration.MigrateFolder(Path.Combine(appData, "MeetingTranscriber"), current);
+            return current;
+        }
+    }
 
     private static string FilePath => Path.Combine(Dir, "settings.json");
 

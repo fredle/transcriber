@@ -6,25 +6,53 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <!-- For System.Windows.Forms.NotifyIcon: WPF has no tray API of its own. -->
+    <UseWindowsForms>true</UseWindowsForms>
     <LangVersion>latest</LangVersion>
 
-    <AssemblyName>MeetingTranscriber</AssemblyName>
-    <Product>Meeting Transcriber</Product>
-    <ApplicationIcon>assets\transcriber.ico</ApplicationIcon>
+    <AssemblyName>Teeline</AssemblyName>
+    <Product>Teeline</Product>
+    <ApplicationIcon>assets\teeline.ico</ApplicationIcon>
 
     <!-- Publish as one self-contained exe: no .NET runtime to install, and the
          icon is embedded in our own executable rather than borrowed from a
          host interpreter, so the taskbar shows the app. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
-    <PublishSingleFile>true</PublishSingleFile>
+    <!-- Folder deployment rather than single-file: the bundle has to unpack
+         itself on a cold start, which measured about twice as slow to first
+         window. The app installs into its own folder anyway. -->
+    <PublishSingleFile>false</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- Compression shrinks the file but costs a decompression pass on every
+         launch; ReadyToRun precompiles so startup is not waiting on the JIT.
+         Both trade size for the thing the user actually feels. -->
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <TieredPGO>true</TieredPGO>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- UseWindowsForms would otherwise add these as global usings, which
+         collide with the WPF types of the same name (Brush, Application,
+         KeyEventArgs). Only TrayIcon.cs wants them, and it imports them
+         explicitly. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shown by the WPF host almost immediately, long before the window is
+         ready, and dismissed automatically when it appears. -->
+    <!-- A Resource, not a SplashScreen item: the built-in handling fades the
+         splash out after the window renders, so we show and close it ourselves
+         to make it vanish the moment the window is on screen. -->
+    <Resource Include="assets\splash.png" />
   </ItemGroup>
 
 </Project>

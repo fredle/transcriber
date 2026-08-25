@@ -1,0 +1,49 @@
+<Window x:Class="MeetingTranscriber.AskMeetingDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Height="560" Width="480" MinHeight="360" MinWidth="380"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource WindowBg}">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="HeaderText" Grid.Row="0" FontSize="13" Foreground="{StaticResource Dim}"
+                   Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+        <Border Grid.Row="1" Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
+                BorderThickness="1" CornerRadius="8" Padding="4">
+            <ScrollViewer x:Name="HistoryScroll" VerticalScrollBarVisibility="Auto" Padding="8">
+                <StackPanel>
+                    <ItemsControl x:Name="HistoryList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="0,0,0,16">
+                                    <TextBlock Text="{Binding Question}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                    <TextBlock Text="{Binding Answer}" Margin="0,6,0,0" TextWrapping="Wrap"
+                                               Foreground="{Binding AnswerColor}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock x:Name="EmptyHint" Text="Ask anything about this meeting - who said what, decisions made, action items..."
+                               Foreground="{StaticResource Dim}" FontStyle="Italic" TextWrapping="Wrap"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="QuestionBox" Grid.Column="0" VerticalAlignment="Center"
+                     KeyDown="OnQuestionKeyDown"/>
+            <Button x:Name="AskButton" Grid.Column="1" Content="Ask" Margin="8,0,0,0"
+                    Padding="16,7" Click="OnAskClick"/>
+        </Grid>
+    </Grid>
+</Window>
