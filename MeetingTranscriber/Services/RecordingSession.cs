@@ -25,9 +25,19 @@ public sealed class RecordingSession : IAsyncDisposable
     private static readonly TimeSpan TitlePollInterval = TimeSpan.FromSeconds(4);
     private const int TitleStablePolls = 2;
 
+    // How often to check who's on the call, and how many consecutive polls a
+    // sighting must survive before it counts, in either direction. Teams'
+    // accessibility tree can return a short/garbled read transiently (e.g.
+    // right as it's still spinning up) - occasionally even a bogus phantom
+    // entry rather than just an incomplete one - so a single sighting is not
+    // enough to record a join, and a single miss is not enough to record a
+    // departure.
+    private static readonly TimeSpan AttendeePollInterval = TimeSpan.FromSeconds(5);
+    private const int AttendeeStablePolls = 2;
+
     private readonly string _apiKey;
-    private readonly AudioDevice _micDevice;
-    private readonly AudioDevice _speakerDevice;
+    private AudioDevice _micDevice;
+    private AudioDevice _speakerDevice;
 
     private WasapiCapture? _micCapture;
     private WasapiLoopbackCapture? _loopbackCapture;
@@ -38,6 +48,15 @@ public sealed class RecordingSession : IAsyncDisposable
     private StreamWriter? _writer;
     private string _folder = "";
     private string? _currentTitle;
+
+    // Guards _presentAttendees/_absentStreaks, which WatchAttendeesAsync
+    // mutates on its own poll loop while StartNewSessionFile/StopAsync (on
+    // the title watcher's or the caller's thread) can close them out at the
+    // same time.
+    private readonly object _attendeeLock = new();
+    private readonly Dictionary<string, DateTime> _presentAttendees = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _candidateStreaks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _absentStreaks = new(StringComparer.OrdinalIgnoreCase);
 
     private CancellationTokenSource? _watcherCts;
 
@@ -52,6 +71,15 @@ public sealed class RecordingSession : IAsyncDisposable
     public string Folder => _folder;
     public float MicLevel => _micLevel;
     public float SpeakerLevel => _speakerLevel;
+    public AudioDevice MicDevice => _micDevice;
+    public AudioDevice SpeakerDevice => _speakerDevice;
+
+    /// <summary>Snapshot of remote participants currently tracked as present, sorted for stable display.</summary>
+    public List<string> CurrentAttendees()
+    {
+        lock (_attendeeLock)
+            return _presentAttendees.Keys.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+    }
 
     public RecordingSession(string apiKey, AudioDevice mic, AudioDevice speaker)
     {
@@ -88,20 +116,97 @@ public sealed class RecordingSession : IAsyncDisposable
         await _micStream.StartAsync().ConfigureAwait(false);
         await _speakerStream.StartAsync().ConfigureAwait(false);
 
-        _micCapture.DataAvailable += (_, e) =>
-            Forward(e, _micCapture.WaveFormat, _micStream, ref _micLevel);
-        _loopbackCapture.DataAvailable += (_, e) =>
-            Forward(e, _loopbackCapture.WaveFormat, _speakerStream, ref _speakerLevel);
+        // Bound to the local capture/stream rather than the field: once a
+        // live device swap can repoint the fields mid-flight (see
+        // ChangeMicDeviceAsync/ChangeSpeakerDeviceAsync below), a callback
+        // still in flight from the outgoing capture must keep feeding the
+        // stream it was actually opened against, not whatever is current.
+        var micCapture = _micCapture;
+        var micStream = _micStream;
+        micCapture.DataAvailable += (_, e) =>
+            Forward(e, micCapture.WaveFormat, micStream, ref _micLevel);
+        var loopbackCapture = _loopbackCapture;
+        var speakerStream = _speakerStream;
+        loopbackCapture.DataAvailable += (_, e) =>
+            Forward(e, loopbackCapture.WaveFormat, speakerStream, ref _speakerLevel);
 
         _micCapture.StartRecording();
         _loopbackCapture.StartRecording();
 
         _watcherCts = new CancellationTokenSource();
         _ = Task.Run(() => WatchMeetingTitleAsync(_watcherCts.Token));
+        _ = Task.Run(() => WatchAttendeesAsync(_watcherCts.Token));
 
         Log?.Invoke($"Transcribing to {_folder}");
         Log?.Invoke($"Mic: {_micDevice.Name} @ {micRate} Hz");
         Log?.Invoke($"Speaker: {_speakerDevice.Name} @ {speakerRate} Hz (loopback)");
+    }
+
+    /// <summary>
+    /// Swap the live microphone device without interrupting the recording.
+    /// Opens the new capture and a fresh AssemblyAI connection first, and
+    /// only tears the old ones down once that succeeds - so a device that
+    /// fails to open (removed, in exclusive use, etc.) leaves the previous
+    /// one running rather than losing audio. Diarisation state for this
+    /// channel restarts on the new connection.
+    /// </summary>
+    public async Task ChangeMicDeviceAsync(AudioDevice device)
+    {
+        var mmDevice = AudioDevices.GetById(device.Id)
+            ?? throw new InvalidOperationException($"Microphone '{device.Name}' is unavailable.");
+
+        var capture = new WasapiCapture(mmDevice);
+        var rate = capture.WaveFormat.SampleRate;
+        var stream = new AssemblyAiStream(_apiKey, rate, "mic");
+        stream.FinalTurn += (text, label, s, e) => WriteLine("ME", label, text, s, e);
+        stream.Error += m => Log?.Invoke(m);
+        await stream.StartAsync().ConfigureAwait(false);
+        capture.DataAvailable += (_, e) => Forward(e, capture.WaveFormat, stream, ref _micLevel);
+
+        var oldCapture = _micCapture;
+        var oldStream = _micStream;
+        try { oldCapture?.StopRecording(); } catch (Exception) { }
+
+        _micCapture = capture;
+        _micStream = stream;
+        _micDevice = device;
+        _micLevel = 0f;
+        capture.StartRecording();
+
+        oldCapture?.Dispose();
+        if (oldStream != null) await oldStream.DisposeAsync().ConfigureAwait(false);
+
+        Log?.Invoke($"Microphone switched to {device.Name} @ {rate} Hz.");
+    }
+
+    /// <summary>Speaker-side counterpart of <see cref="ChangeMicDeviceAsync"/>.</summary>
+    public async Task ChangeSpeakerDeviceAsync(AudioDevice device)
+    {
+        var mmDevice = AudioDevices.GetById(device.Id)
+            ?? throw new InvalidOperationException($"Speaker '{device.Name}' is unavailable.");
+
+        var capture = new WasapiLoopbackCapture(mmDevice);
+        var rate = capture.WaveFormat.SampleRate;
+        var stream = new AssemblyAiStream(_apiKey, rate, "speaker");
+        stream.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
+        stream.Error += m => Log?.Invoke(m);
+        await stream.StartAsync().ConfigureAwait(false);
+        capture.DataAvailable += (_, e) => Forward(e, capture.WaveFormat, stream, ref _speakerLevel);
+
+        var oldCapture = _loopbackCapture;
+        var oldStream = _speakerStream;
+        try { oldCapture?.StopRecording(); } catch (Exception) { }
+
+        _loopbackCapture = capture;
+        _speakerStream = stream;
+        _speakerDevice = device;
+        _speakerLevel = 0f;
+        capture.StartRecording();
+
+        oldCapture?.Dispose();
+        if (oldStream != null) await oldStream.DisposeAsync().ConfigureAwait(false);
+
+        Log?.Invoke($"Speaker switched to {device.Name} @ {rate} Hz.");
     }
 
     /// <summary>
@@ -213,19 +318,116 @@ public sealed class RecordingSession : IAsyncDisposable
         writer.Flush();
 
         StreamWriter? previous;
+        string previousFolder;
         lock (_writerLock)
         {
             previous = _writer;
+            previousFolder = _folder;
             _writer = writer;
             _folder = folder;
         }
         previous?.Dispose();
+
+        // A rollover doesn't mean anyone left - they're still on the same
+        // call - so close each present attendee's segment in the old folder
+        // and immediately reopen it in the new one, rather than waiting for
+        // the next poll to notice they're "still" there.
+        if (announce && previousFolder.Length > 0)
+        {
+            var now = DateTime.Now;
+            lock (_attendeeLock)
+            {
+                foreach (var name in _presentAttendees.Keys.ToList())
+                {
+                    TryAppendAttendeeEvent(previousFolder, name, joined: false, now);
+                    _presentAttendees[name] = now;
+                    TryAppendAttendeeEvent(folder, name, joined: true, now);
+                }
+                _candidateStreaks.Clear();
+                _absentStreaks.Clear();
+            }
+        }
 
         if (announce)
         {
             Log?.Invoke($"Meeting changed -> {title}; now recording into {Path.GetFileName(folder)}");
             NewSession?.Invoke(folder, title ?? "Untitled meeting");
         }
+    }
+
+    /// <summary>
+    /// Polls Teams' participant roster and appends join/leave sightings to
+    /// the current meeting folder's attendee log. A name must survive
+    /// AttendeeStablePolls consecutive polls before being recorded as
+    /// joined, and an already-present attendee must be missing for that many
+    /// consecutive polls before being declared gone - symmetric debouncing,
+    /// since a single transient UI Automation read can be not just
+    /// incomplete but occasionally a bogus phantom entry.
+    /// </summary>
+    private async Task WatchAttendeesAsync(CancellationToken cancel)
+    {
+        while (!cancel.IsCancellationRequested)
+        {
+            try { await Task.Delay(AttendeePollInterval, cancel).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+
+            List<string> current;
+            try { current = TeamsMonitor.GetParticipants(); }
+            catch (Exception) { continue; }
+
+            string folder;
+            lock (_writerLock) { folder = _folder; }
+            if (folder.Length == 0) continue;
+
+            var currentSet = new HashSet<string>(current, StringComparer.OrdinalIgnoreCase);
+            var now = DateTime.Now;
+
+            lock (_attendeeLock)
+            {
+                foreach (var name in current)
+                {
+                    _absentStreaks.Remove(name);
+                    if (_presentAttendees.ContainsKey(name)) continue;
+
+                    var streak = _candidateStreaks.GetValueOrDefault(name) + 1;
+                    if (streak < AttendeeStablePolls)
+                    {
+                        _candidateStreaks[name] = streak;
+                        continue;
+                    }
+                    _candidateStreaks.Remove(name);
+                    _presentAttendees[name] = now;
+                    TryAppendAttendeeEvent(folder, name, joined: true, now);
+                }
+
+                // Drop candidate streaks for anyone not seen this poll, so a
+                // one-off sighting doesn't sit around half-credited toward a
+                // much later, unrelated sighting of the same name.
+                foreach (var name in _candidateStreaks.Keys.ToList())
+                    if (!currentSet.Contains(name)) _candidateStreaks.Remove(name);
+
+                foreach (var name in _presentAttendees.Keys.ToList())
+                {
+                    if (currentSet.Contains(name)) continue;
+
+                    var streak = _absentStreaks.GetValueOrDefault(name) + 1;
+                    if (streak < AttendeeStablePolls)
+                    {
+                        _absentStreaks[name] = streak;
+                        continue;
+                    }
+                    _absentStreaks.Remove(name);
+                    _presentAttendees.Remove(name);
+                    TryAppendAttendeeEvent(folder, name, joined: false, now);
+                }
+            }
+        }
+    }
+
+    private static void TryAppendAttendeeEvent(string folder, string name, bool joined, DateTime at)
+    {
+        try { MeetingStore.AppendAttendeeEvent(folder, name, joined, at); }
+        catch (Exception) { /* best-effort; a missed event isn't worth disrupting the recording */ }
     }
 
     /// <summary>
@@ -270,6 +472,21 @@ public sealed class RecordingSession : IAsyncDisposable
     public async Task StopAsync()
     {
         _watcherCts?.Cancel();
+
+        string finalFolder;
+        lock (_writerLock) { finalFolder = _folder; }
+        lock (_attendeeLock)
+        {
+            if (finalFolder.Length > 0)
+            {
+                var now = DateTime.Now;
+                foreach (var name in _presentAttendees.Keys)
+                    TryAppendAttendeeEvent(finalFolder, name, joined: false, now);
+            }
+            _presentAttendees.Clear();
+            _candidateStreaks.Clear();
+            _absentStreaks.Clear();
+        }
 
         try { _micCapture?.StopRecording(); } catch (Exception) { }
         try { _loopbackCapture?.StopRecording(); } catch (Exception) { }

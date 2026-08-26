@@ -40,7 +40,8 @@
                                            TextTrimming="CharacterEllipsis"
                                            ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
                             </StackPanel>
-                            <ComboBox x:Name="MicCombo" Width="160" VerticalAlignment="Center" Margin="0,0,18,0"/>
+                            <ComboBox x:Name="MicCombo" Width="160" VerticalAlignment="Center" Margin="0,0,18,0"
+                                      SelectionChanged="OnMicComboChanged"/>
 
                             <StackPanel Width="130" VerticalAlignment="Center" Margin="0,0,10,0">
                                 <TextBlock Text="Speaker · others" FontWeight="SemiBold" FontSize="12"/>
@@ -48,7 +49,8 @@
                                            TextTrimming="CharacterEllipsis"
                                            ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
                             </StackPanel>
-                            <ComboBox x:Name="SpeakerCombo" Width="160" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="SpeakerCombo" Width="160" VerticalAlignment="Center"
+                                      SelectionChanged="OnSpeakerComboChanged"/>
 
                             <Button x:Name="MatchTeamsButton" Content="Match Teams" Margin="14,0,0,0"
                                     VerticalAlignment="Center" Click="OnMatchTeams" Visibility="Collapsed"
@@ -156,6 +158,19 @@
                                         <Button x:Name="LiveScreenshotNextButton" Grid.Column="2" Content="▶"
                                                 Width="28" VerticalAlignment="Center" Click="OnLiveScreenshotNext"/>
                                     </Grid>
+                                </DockPanel>
+                            </Border>
+                            <Border x:Name="LiveAttendeesPanel" DockPanel.Dock="Bottom"
+                                    Style="{StaticResource Card}" Padding="8" Margin="0,10,8,0"
+                                    Visibility="Collapsed">
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Top" Text="Attendees" FontWeight="SemiBold"
+                                               FontSize="12" Margin="0,0,0,4"/>
+                                    <TextBlock x:Name="LiveAttendeesSummary" DockPanel.Dock="Top" FontSize="12"
+                                               TextWrapping="Wrap" Margin="0,0,0,6"/>
+                                    <ListBox x:Name="LiveAttendeeLogList" MaxHeight="90" FontSize="11"
+                                             Foreground="{StaticResource Dim}"
+                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                                 </DockPanel>
                             </Border>
                             <Grid>
@@ -413,6 +428,22 @@
                                             <Button x:Name="ScreenshotNextButton" Grid.Column="2" Content="▶"
                                                     Width="28" VerticalAlignment="Center" Click="OnScreenshotNext"/>
                                         </Grid>
+                                    </DockPanel>
+                                </Border>
+                                <Border x:Name="ViewerAttendeesPanel" DockPanel.Dock="Bottom"
+                                        Style="{StaticResource Card}" Padding="8" Margin="4,10,0,0"
+                                        Visibility="Collapsed">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Top" Text="Attendees" FontWeight="SemiBold"
+                                                   FontSize="12" Margin="0,0,0,6"/>
+                                        <ListBox x:Name="ViewerAttendeesList" MaxHeight="140" FontSize="12"
+                                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                            <ListBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Display}" TextWrapping="Wrap"/>
+                                                </DataTemplate>
+                                            </ListBox.ItemTemplate>
+                                        </ListBox>
                                     </DockPanel>
                                 </Border>
                                 <Grid>

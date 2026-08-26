@@ -45,6 +45,30 @@ public sealed class TranscriptLine
     }
 }
 
+/// <summary>One join or leave sighting of a remote participant, as recorded live during a recording.</summary>
+public sealed class AttendeeEvent
+{
+    public required string Name { get; init; }
+    public required bool Joined { get; init; }   // true = join, false = leave
+    public required DateTime Timestamp { get; init; }
+}
+
+/// <summary>
+/// One continuous stretch a participant was present for. A name can have
+/// more than one of these if they left and rejoined; a null Left means they
+/// were still present as of the last recorded sighting.
+/// </summary>
+public sealed class AttendeeSummary
+{
+    public required string Name { get; init; }
+    public required DateTime Joined { get; init; }
+    public DateTime? Left { get; init; }
+
+    public string Display => Left is { } left
+        ? $"{Name} — {Joined:HH:mm}–{left:HH:mm}"
+        : $"{Name} — joined {Joined:HH:mm}, still on call";
+}
+
 public sealed class Meeting
 {
     public required string Folder { get; init; }
@@ -83,6 +107,7 @@ public static class MeetingStore
     public const string TranscriptFileName = "transcriptions.jsonl";
     public const string NotesFileName = "notes.rtf";
     public const string SpeakerNamesFileName = "speakers.json";
+    public const string AttendeesFileName = "attendees.jsonl";
 
     private static string? _root;
 
@@ -518,6 +543,71 @@ public static class MeetingStore
         var files = Directory.GetFiles(dir, "screenshot_*.png");
         Array.Sort(files, StringComparer.Ordinal);
         return files.ToList();
+    }
+
+    /// <summary>
+    /// Append one join/leave sighting of a remote participant. Written live
+    /// during recording, so this is an append-only log (like the transcript)
+    /// rather than a rewritten whole-file snapshot (like speakers.json) - a
+    /// crash mid-meeting still leaves prior sightings intact. No-ops if the
+    /// folder has gone.
+    /// </summary>
+    public static void AppendAttendeeEvent(string dir, string name, bool joined, DateTime timestamp)
+    {
+        if (!Directory.Exists(dir)) return;
+        var path = Path.Combine(dir, AttendeesFileName);
+        var entry = new { name, joined, timestamp = timestamp.ToString("o") };
+        using var writer = new StreamWriter(path, append: true);
+        writer.WriteLine(JsonSerializer.Serialize(entry));
+    }
+
+    /// <summary>Raw join/leave sightings for a meeting, in the order they were recorded.</summary>
+    public static List<AttendeeEvent> GetAttendeeEvents(string dir)
+    {
+        var result = new List<AttendeeEvent>();
+        var path = Path.Combine(dir, AttendeesFileName);
+        if (!File.Exists(path)) return result;
+
+        foreach (var raw in ReadLinesShared(path))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0) continue;
+            if (!TryParse(line, out var entry)) continue;
+
+            var name = entry.TryGetProperty("name", out var n) ? n.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            var joined = entry.TryGetProperty("joined", out var j) && j.GetBoolean();
+            DateTime? stamp = entry.TryGetProperty("timestamp", out var ts) &&
+                               DateTime.TryParse(ts.GetString(), out var parsed) ? parsed : null;
+            if (stamp == null) continue;
+
+            result.Add(new AttendeeEvent { Name = name, Joined = joined, Timestamp = stamp.Value });
+        }
+        return result;
+    }
+
+    /// <summary>Attendee presence segments for a meeting, aggregated from the raw join/leave log.</summary>
+    public static List<AttendeeSummary> GetAttendeeSummary(string dir)
+    {
+        var open = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<AttendeeSummary>();
+
+        foreach (var e in GetAttendeeEvents(dir))
+        {
+            if (e.Joined)
+            {
+                open[e.Name] = e.Timestamp;
+            }
+            else if (open.TryGetValue(e.Name, out var joinedAt))
+            {
+                result.Add(new AttendeeSummary { Name = e.Name, Joined = joinedAt, Left = e.Timestamp });
+                open.Remove(e.Name);
+            }
+        }
+        foreach (var (name, joinedAt) in open)
+            result.Add(new AttendeeSummary { Name = name, Joined = joinedAt, Left = null });
+
+        return result.OrderBy(a => a.Joined).ToList();
     }
 
     /// <summary>

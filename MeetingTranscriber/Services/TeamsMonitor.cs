@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows.Automation;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
 
@@ -104,6 +107,63 @@ public static class TeamsMonitor
 
     /// <summary>Window handle of the same best-guess meeting window, for screenshotting. IntPtr.Zero if none is found.</summary>
     public static IntPtr GetMeetingWindowHandle() => GetBestMeetingWindow()?.Hwnd ?? IntPtr.Zero;
+
+    // Trailing relationship label Teams appends to a tile's accessible name
+    // for contacts outside the org, e.g. "Tyler Cloherty External unfamiliar".
+    private static readonly Regex ExternalSuffix = new(@"\s+External(\s+unfamiliar)?$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Best-effort roster of remote participants, read from the Teams meeting
+    /// window's accessibility tree rather than OCR/screenshots - this also
+    /// surfaces participants who are paginated out of the visible video
+    /// gallery. Each participant tile is exposed as a MenuItem whose Name is
+    /// "&lt;name&gt;[ External unfamiliar], &lt;state flags...&gt;"; the self
+    /// tile (an Image, not a MenuItem) and small relationship-label sub
+    /// elements (Groups) are excluded by the ControlType filter alone.
+    /// Returns an empty list if Teams isn't found or has no roster yet -
+    /// including while its accessibility tree is still spinning up, which can
+    /// take a few seconds after the window first appears.
+    /// </summary>
+    public static List<string> GetParticipants()
+    {
+        var names = new List<string>();
+        try
+        {
+            var hwnd = GetMeetingWindowHandle();
+            if (hwnd == IntPtr.Zero) return names;
+
+            var root = AutomationElement.FromHandle(hwnd);
+            if (root == null) return names;
+
+            var tiles = root.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem));
+
+            foreach (AutomationElement tile in tiles)
+            {
+                var raw = tile.Current.Name;
+                if (string.IsNullOrWhiteSpace(raw)) continue;
+
+                // A screen-share tile is also a MenuItem, named "Content
+                // shared by <name>" - it duplicates that person's own tile
+                // rather than naming a distinct attendee, so skip it.
+                if (raw.StartsWith("Content shared by ", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var name = raw.Split(',')[0].Trim();
+                name = ExternalSuffix.Replace(name, "").Trim();
+
+                // Teams surfaces a "System" pseudo-tile (e.g. recording/consent
+                // notices) as a MenuItem too, and it flickers in and out rather
+                // than staying put or leaving cleanly - not a real attendee.
+                if (name.Length > 0 && !string.Equals(name, "System", StringComparison.OrdinalIgnoreCase))
+                    names.Add(name);
+            }
+        }
+        catch (Exception)
+        {
+            // Best-effort: report nothing found rather than throw.
+        }
+        return names.Distinct().ToList();
+    }
 
     private static (IntPtr Hwnd, string Name)? GetBestMeetingWindow()
     {

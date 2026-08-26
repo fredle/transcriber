@@ -45,6 +45,11 @@ public partial class MainWindow : Window
     private string? _detectedMicId;
     private string? _detectedSpeakerId;
 
+    // True while LoadDevices() is repopulating the combos, so that its
+    // programmatic SelectedItem assignment doesn't get treated as the user
+    // asking to switch device.
+    private bool _suppressDeviceChangeHandling;
+
     // Silence watchdog: how many consecutive 200ms ticks each channel has
     // been near-silent while recording, and whether that has already been
     // reported so it doesn't repeat every tick.
@@ -59,6 +64,14 @@ public partial class MainWindow : Window
     private List<TranscriptLine> _openLines = new();
     private ScreenshotStrip _liveScreenshots = null!;
     private ScreenshotStrip _viewerScreenshots = null!;
+
+    // Live attendee log: names known present as of the last check, and a
+    // capped, newest-first list of "joined"/"left" lines derived by diffing
+    // successive checks - RecordingSession only exposes a snapshot, so the
+    // join/leave history shown live is reconstructed here rather than there.
+    private const int LiveAttendeeLogCap = 30;
+    private HashSet<string> _lastKnownAttendees = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _liveAttendeeLog = new();
 
     // The meeting folder live notes are currently being saved into, or null
     // when nothing is being transcribed.
@@ -218,18 +231,25 @@ public partial class MainWindow : Window
         var mics = AudioDevices.GetMicrophones();
         var speakers = AudioDevices.GetSpeakers();
 
-        MicCombo.ItemsSource = mics;
-        SpeakerCombo.ItemsSource = speakers;
+        // Repopulating the combos below fires SelectionChanged, which would
+        // otherwise be read as the user asking to switch device.
+        _suppressDeviceChangeHandling = true;
+        try
+        {
+            MicCombo.ItemsSource = mics;
+            SpeakerCombo.ItemsSource = speakers;
 
-        // Default to whatever Teams is using, unless a choice was saved.
-        MicCombo.SelectedItem =
-            mics.FirstOrDefault(d => d.Id == _settings.MicDeviceId)
-            ?? mics.FirstOrDefault(d => d.IsDefaultComms)
-            ?? mics.FirstOrDefault();
-        SpeakerCombo.SelectedItem =
-            speakers.FirstOrDefault(d => d.Id == _settings.SpeakerDeviceId)
-            ?? speakers.FirstOrDefault(d => d.IsDefaultComms)
-            ?? speakers.FirstOrDefault();
+            // Default to whatever Teams is using, unless a choice was saved.
+            MicCombo.SelectedItem =
+                mics.FirstOrDefault(d => d.Id == _settings.MicDeviceId)
+                ?? mics.FirstOrDefault(d => d.IsDefaultComms)
+                ?? mics.FirstOrDefault();
+            SpeakerCombo.SelectedItem =
+                speakers.FirstOrDefault(d => d.Id == _settings.SpeakerDeviceId)
+                ?? speakers.FirstOrDefault(d => d.IsDefaultComms)
+                ?? speakers.FirstOrDefault();
+        }
+        finally { _suppressDeviceChangeHandling = false; }
 
         // The real check (below) only finds anything while Teams has an
         // active call, so seed the hint from the default comms device until
@@ -240,6 +260,72 @@ public partial class MainWindow : Window
     }
 
     private void OnRefreshDevices(object sender, RoutedEventArgs e) => LoadDevices();
+
+    /// <summary>
+    /// The user (or the "Match Teams" button) picked a different microphone.
+    /// While recording, this hot-swaps the live capture rather than waiting
+    /// for the next Start; otherwise it's just remembered for next time.
+    /// </summary>
+    private async void OnMicComboChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressDeviceChangeHandling) return;
+        if (MicCombo.SelectedItem is not AudioDevice mic) return;
+
+        _settings.MicDeviceId = mic.Id;
+        _settings.Save();
+        UpdateTeamsDeviceMatch();
+
+        var session = _session;
+        if (session == null) return;
+        try
+        {
+            await session.ChangeMicDeviceAsync(mic);
+            Log($"Switched microphone to {mic.Name}.");
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not switch microphone: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "Switch failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (ReferenceEquals(_session, session)) RevertComboSelection(MicCombo, session.MicDevice);
+        }
+    }
+
+    /// <summary>Speaker-side counterpart of <see cref="OnMicComboChanged"/>.</summary>
+    private async void OnSpeakerComboChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressDeviceChangeHandling) return;
+        if (SpeakerCombo.SelectedItem is not AudioDevice speaker) return;
+
+        _settings.SpeakerDeviceId = speaker.Id;
+        _settings.Save();
+        UpdateTeamsDeviceMatch();
+
+        var session = _session;
+        if (session == null) return;
+        try
+        {
+            await session.ChangeSpeakerDeviceAsync(speaker);
+            Log($"Switched speaker to {speaker.Name}.");
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not switch speaker: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "Switch failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            if (ReferenceEquals(_session, session)) RevertComboSelection(SpeakerCombo, session.SpeakerDevice);
+        }
+    }
+
+    /// <summary>Put a combo back on the device a failed switch left actually active, without re-triggering a switch.</summary>
+    private void RevertComboSelection(ComboBox combo, AudioDevice actual)
+    {
+        _suppressDeviceChangeHandling = true;
+        try
+        {
+            var devices = combo.ItemsSource as List<AudioDevice>;
+            combo.SelectedItem = devices?.FirstOrDefault(d => d.Id == actual.Id) ?? combo.SelectedItem;
+        }
+        finally { _suppressDeviceChangeHandling = false; }
+    }
 
     /// <summary>
     /// Refreshes the "Teams using: ..." hints, warns when Teams has switched
@@ -270,7 +356,6 @@ public partial class MainWindow : Window
             (_detectedSpeakerId != null && selectedSpeaker != null && _detectedSpeakerId != selectedSpeaker.Id);
 
         MatchTeamsButton.Visibility = mismatch ? Visibility.Visible : Visibility.Collapsed;
-        MatchTeamsButton.IsEnabled = _session == null;
     }
 
     /// <summary>
@@ -301,6 +386,11 @@ public partial class MainWindow : Window
         UpdateTeamsDeviceMatch();
     }
 
+    /// <summary>
+    /// Just re-points the combos at what Teams is using - OnMicComboChanged/
+    /// OnSpeakerComboChanged (fired by the assignments below) do the actual
+    /// settings save and, if recording, the live switch.
+    /// </summary>
     private void OnMatchTeams(object sender, RoutedEventArgs e)
     {
         var mics = MicCombo.ItemsSource as List<AudioDevice>;
@@ -310,13 +400,6 @@ public partial class MainWindow : Window
             MicCombo.SelectedItem = mic;
         if (_detectedSpeakerId is { } spkId && speakers?.FirstOrDefault(d => d.Id == spkId) is { } speaker)
             SpeakerCombo.SelectedItem = speaker;
-
-        if (MicCombo.SelectedItem is AudioDevice selectedMic) _settings.MicDeviceId = selectedMic.Id;
-        if (SpeakerCombo.SelectedItem is AudioDevice selectedSpeaker) _settings.SpeakerDeviceId = selectedSpeaker.Id;
-        _settings.Save();
-
-        Log("Matched the microphone/speaker selection to what Teams is using.");
-        UpdateTeamsDeviceMatch();
     }
 
     private void OnSaveKey(object sender, RoutedEventArgs e)
@@ -397,6 +480,8 @@ public partial class MainWindow : Window
         _notesFolder = session.Folder;
         LoadNotesInto(session.Folder);
         _liveScreenshots.Load(session.Folder);
+        _lastKnownAttendees.Clear();
+        _liveAttendeeLog.Clear();
         SetRecordingUi(true);
         UpdateMeetingNotesEditability();
     }
@@ -419,6 +504,10 @@ public partial class MainWindow : Window
             var endedFolder = _notesFolder;
             _notesFolder = null;
             _liveScreenshots.Load(null);
+            _lastKnownAttendees.Clear();
+            _liveAttendeeLog.Clear();
+            LiveAttendeeLogList.ItemsSource = null;
+            LiveAttendeesPanel.Visibility = Visibility.Collapsed;
             if (endedFolder != null && MeetingStore.IsEmpty(endedFolder))
                 MeetingStore.DeleteRecording(endedFolder);
             SetRecordingUi(false);
@@ -475,7 +564,8 @@ public partial class MainWindow : Window
         RecordButton.Background = new SolidColorBrush(
             (Color)Application.Current.FindResource(recording ? "StopColor" : "StartColor"));
         ScreenshotButton.IsEnabled = recording;
-        MicCombo.IsEnabled = SpeakerCombo.IsEnabled = !recording;
+        // Left enabled while recording too: OnMicComboChanged/OnSpeakerComboChanged
+        // hot-swap the live capture rather than requiring a stop/start.
         NotesBox.IsEnabled = recording;
         NotesHint.Visibility = recording ? Visibility.Collapsed : Visibility.Visible;
         if (!recording) NotesBox.Document.Blocks.Clear();
@@ -510,7 +600,46 @@ public partial class MainWindow : Window
         _tray?.Update(_session != null, inCall, title);
         HandleCallTransition(inCall, title);
         RefreshTeamsDeviceDetection(inCall, detectedSpeakerId);
+        UpdateLiveAttendees();
         _wasInCall = inCall;
+    }
+
+    /// <summary>
+    /// Refreshes the live "who's on the call" panel by diffing the session's
+    /// current attendee snapshot against the last check, since
+    /// RecordingSession only exposes a snapshot rather than raising its own
+    /// join/leave events.
+    /// </summary>
+    private void UpdateLiveAttendees()
+    {
+        var current = _session?.CurrentAttendees() ?? new List<string>();
+        var currentSet = new HashSet<string>(current, StringComparer.OrdinalIgnoreCase);
+
+        if (_session != null)
+        {
+            var now = DateTime.Now.ToString("HH:mm:ss");
+            foreach (var name in current)
+                if (!_lastKnownAttendees.Contains(name))
+                    PushAttendeeLogLine($"{now}  {name} joined");
+            foreach (var name in _lastKnownAttendees)
+                if (!currentSet.Contains(name))
+                    PushAttendeeLogLine($"{now}  {name} left");
+        }
+        _lastKnownAttendees = currentSet;
+
+        LiveAttendeesPanel.Visibility = _session != null && current.Count > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+        LiveAttendeesSummary.Text = current.Count == 0
+            ? "No attendees detected yet."
+            : $"On the call ({current.Count}): {string.Join(", ", current)}";
+    }
+
+    private void PushAttendeeLogLine(string line)
+    {
+        _liveAttendeeLog.Insert(0, line);
+        if (_liveAttendeeLog.Count > LiveAttendeeLogCap) _liveAttendeeLog.RemoveAt(_liveAttendeeLog.Count - 1);
+        LiveAttendeeLogList.ItemsSource = null;
+        LiveAttendeeLogList.ItemsSource = _liveAttendeeLog;
     }
 
     /// <summary>
@@ -917,6 +1046,10 @@ public partial class MainWindow : Window
         LoadMeetingNotes(meeting);
         UpdateMeetingNotesEditability();
         _viewerScreenshots.Load(meeting.Path);
+
+        var attendees = MeetingStore.GetAttendeeSummary(meeting.Path);
+        ViewerAttendeesList.ItemsSource = attendees;
+        ViewerAttendeesPanel.Visibility = attendees.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OnScreenshotPrev(object sender, RoutedEventArgs e) => _viewerScreenshots.Prev();
@@ -1077,6 +1210,8 @@ public partial class MainWindow : Window
         MeetingNotesHint.Text = "Select a meeting to view or edit its notes.";
         MeetingNotesHint.Visibility = Visibility.Visible;
         _viewerScreenshots.Load(null);
+        ViewerAttendeesList.ItemsSource = null;
+        ViewerAttendeesPanel.Visibility = Visibility.Collapsed;
     }
 
     private void OnTranscriptSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1154,16 +1289,8 @@ public partial class MainWindow : Window
         }
 
         var ordered = selected.OrderBy(m => m.Started ?? DateTime.MaxValue).ToList();
-        var title = InputDialog.Prompt(this, "Merge meetings",
-            $"Merge {selected.Count} meetings into one. Title for the merged meeting:", ordered[0].Title);
+        var title = MergeMeetingsDialog.Prompt(this, ordered, ordered[0].Title);
         if (string.IsNullOrWhiteSpace(title)) return;
-
-        var list = string.Join(Environment.NewLine, ordered.Select(m => $"- {m.Title} ({m.When})"));
-        var confirm = MessageBox.Show(this,
-            $"Merge these {selected.Count} meetings into \"{title.Trim()}\"?\n\n{list}\n\n" +
-            "Their transcripts will be interleaved by time and the originals moved to the Recycle Bin.",
-            "Merge meetings", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No);
-        if (confirm != MessageBoxResult.Yes) return;
 
         string folder;
         try
