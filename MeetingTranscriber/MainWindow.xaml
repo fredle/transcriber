@@ -15,8 +15,6 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
@@ -24,62 +22,79 @@
                            FontWeight="SemiBold" FontSize="13" Foreground="{StaticResource Dim}"
                            Text="Checking for a Teams call..."/>
 
-                <!-- Devices -->
-                <Grid x:Name="DevicesRow" Grid.Row="1" Margin="0,0,0,12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-
-                    <Border Grid.Column="0" Style="{StaticResource Card}" Margin="0,0,5,0">
-                        <StackPanel>
-                            <TextBlock Text="Microphone  ·  you" FontWeight="SemiBold" FontSize="14"/>
-                            <TextBlock x:Name="MicHint" Foreground="{StaticResource Mic}"
-                                       FontSize="11" Margin="0,4,0,8"/>
-                            <ComboBox x:Name="MicCombo"/>
-                        </StackPanel>
-                    </Border>
-
-                    <Border Grid.Column="1" Style="{StaticResource Card}" Margin="5,0,0,0">
-                        <StackPanel>
-                            <TextBlock Text="Speaker  ·  others" FontWeight="SemiBold" FontSize="14"/>
-                            <TextBlock x:Name="SpkHint" Foreground="{StaticResource Spk}"
-                                       FontSize="11" Margin="0,4,0,8"/>
-                            <ComboBox x:Name="SpeakerCombo"/>
-                        </StackPanel>
-                    </Border>
-                </Grid>
-
-                <!-- Levels -->
-                <Border x:Name="LevelsRow" Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,12">
-                    <StackPanel>
-                        <Grid>
-                            <TextBlock Text="Mic" Foreground="{StaticResource Mic}" FontSize="11" FontWeight="SemiBold"/>
-                        </Grid>
-                        <ProgressBar x:Name="MicLevelBar" Height="8" Maximum="1" Margin="0,4,0,10"
-                                     Foreground="{StaticResource Mic}"
-                                     Background="{StaticResource TrackBg}" BorderThickness="0"/>
-                        <TextBlock Text="Speaker" Foreground="{StaticResource Spk}" FontSize="11" FontWeight="SemiBold"/>
-                        <ProgressBar x:Name="SpkLevelBar" Height="8" Maximum="1" Margin="0,4,0,0"
-                                     Foreground="{StaticResource Spk}"
-                                     Background="{StaticResource TrackBg}" BorderThickness="0"/>
-                    </StackPanel>
-                </Border>
-
-                <!-- Refresh -->
-                <Border x:Name="KeyRow" Grid.Row="3" Style="{StaticResource Card}" Padding="12,10" Margin="0,0,0,12">
+                <!-- Devices, levels, and refresh: one compact row -->
+                <Border Grid.Row="1" Style="{StaticResource Card}" Padding="14,10" Margin="0,0,0,12">
                     <Grid>
-                        <Button Content="Refresh devices" HorizontalAlignment="Right" Click="OnRefreshDevices"/>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Mic + speaker pickers -->
+                        <StackPanel x:Name="DevicesRow" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                            <StackPanel Width="130" VerticalAlignment="Center" Margin="0,0,10,0">
+                                <TextBlock Text="Microphone · you" FontWeight="SemiBold" FontSize="12"/>
+                                <TextBlock x:Name="MicHint" Foreground="{StaticResource Mic}" FontSize="10"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                            </StackPanel>
+                            <ComboBox x:Name="MicCombo" Width="160" VerticalAlignment="Center" Margin="0,0,18,0"/>
+
+                            <StackPanel Width="130" VerticalAlignment="Center" Margin="0,0,10,0">
+                                <TextBlock Text="Speaker · others" FontWeight="SemiBold" FontSize="12"/>
+                                <TextBlock x:Name="SpkHint" Foreground="{StaticResource Spk}" FontSize="10"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                            </StackPanel>
+                            <ComboBox x:Name="SpeakerCombo" Width="160" VerticalAlignment="Center"/>
+
+                            <Button x:Name="MatchTeamsButton" Content="Match Teams" Margin="14,0,0,0"
+                                    VerticalAlignment="Center" Click="OnMatchTeams" Visibility="Collapsed"
+                                    ToolTip="Switch the selection above to whatever Teams is currently using"/>
+                        </StackPanel>
+
+                        <!-- Level meters -->
+                        <StackPanel x:Name="LevelsRow" Grid.Column="1" Orientation="Horizontal"
+                                    VerticalAlignment="Center" Margin="24,0,0,0">
+                            <StackPanel Width="60" Margin="0,0,14,0">
+                                <TextBlock Text="Mic" Foreground="{StaticResource Mic}" FontSize="10" FontWeight="SemiBold"/>
+                                <ProgressBar x:Name="MicLevelBar" Height="6" Maximum="1" Margin="0,3,0,0"
+                                             Foreground="{StaticResource Mic}"
+                                             Background="{StaticResource TrackBg}" BorderThickness="0"/>
+                            </StackPanel>
+                            <StackPanel Width="60">
+                                <TextBlock Text="Speaker" Foreground="{StaticResource Spk}" FontSize="10" FontWeight="SemiBold"/>
+                                <ProgressBar x:Name="SpkLevelBar" Height="6" Maximum="1" Margin="0,3,0,0"
+                                             Foreground="{StaticResource Spk}"
+                                             Background="{StaticResource TrackBg}" BorderThickness="0"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <Button x:Name="KeyRow" Grid.Column="3" Content="Refresh devices"
+                                VerticalAlignment="Center" Click="OnRefreshDevices"/>
                     </Grid>
                 </Border>
 
-                <Button x:Name="RecordButton" Grid.Row="4" Height="46" Margin="0,0,0,12"
-                        Content="Start Transcribing" FontSize="15" FontWeight="SemiBold"
-                        Foreground="White" Background="#2D6A4F" BorderBrush="#255B43"
-                        Click="OnToggleRecording"/>
+                <Grid Grid.Row="2" Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="RecordButton" Grid.Column="0" Height="46"
+                            Content="Start Transcribing" FontSize="15" FontWeight="SemiBold"
+                            Foreground="White" Background="#2D6A4F" BorderBrush="#255B43"
+                            Click="OnToggleRecording"/>
+                    <Button x:Name="ScreenshotButton" Grid.Column="1" Height="46" Margin="10,0,0,0"
+                            Padding="14,0" FontSize="13" FontWeight="SemiBold"
+                            Content="Screenshot meeting" IsEnabled="False"
+                            ToolTip="Copy a screenshot of the Teams meeting window to the clipboard and save it into this meeting's folder"
+                            Click="OnScreenshotMeeting"/>
+                </Grid>
 
                 <!-- Output -->
-                <Grid Grid.Row="5">
+                <Grid Grid.Row="3">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition x:Name="LiveTranscriptCol" Width="3*"/>
                         <ColumnDefinition Width="2*"/>
@@ -119,6 +134,30 @@
                                 <Button Content="•" Width="28" Padding="0" Margin="4,0,0,0"
                                         Command="ToggleBullets" CommandTarget="{Binding ElementName=NotesBox}"/>
                             </StackPanel>
+                            <Border x:Name="LiveScreenshotsPanel" DockPanel.Dock="Bottom"
+                                    Style="{StaticResource Card}" Padding="8" Margin="0,10,8,0"
+                                    Visibility="Collapsed">
+                                <DockPanel>
+                                    <Grid DockPanel.Dock="Top" Margin="0,0,0,6">
+                                        <TextBlock Text="Screenshots" FontWeight="SemiBold" FontSize="12"/>
+                                        <TextBlock x:Name="LiveScreenshotCounter" HorizontalAlignment="Right"
+                                                   FontSize="11" Foreground="{StaticResource Dim}"/>
+                                    </Grid>
+                                    <Grid Height="170">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Button x:Name="LiveScreenshotPrevButton" Grid.Column="0" Content="◀"
+                                                Width="28" VerticalAlignment="Center" Click="OnLiveScreenshotPrev"/>
+                                        <Image x:Name="LiveScreenshotImage" Grid.Column="1" Stretch="Uniform"
+                                               Margin="6,0"/>
+                                        <Button x:Name="LiveScreenshotNextButton" Grid.Column="2" Content="▶"
+                                                Width="28" VerticalAlignment="Center" Click="OnLiveScreenshotNext"/>
+                                    </Grid>
+                                </DockPanel>
+                            </Border>
                             <Grid>
                                 <RichTextBox x:Name="NotesBox" IsEnabled="False"
                                              Background="{StaticResource Panel}"
@@ -152,8 +191,11 @@
                         <Grid DockPanel.Dock="Top" Margin="2,0,2,10">
                             <TextBlock Text="Recent Meetings" FontWeight="SemiBold" FontSize="14"
                                        VerticalAlignment="Center"/>
-                            <Button Content="Refresh" HorizontalAlignment="Right" Padding="9,4"
-                                    Click="OnRefreshMeetings"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="MergeMeetingsButton" Content="Merge" Margin="0,0,6,0"
+                                        Padding="9,4" Visibility="Collapsed" Click="OnMergeMeetings"/>
+                                <Button Content="Refresh" Padding="9,4" Click="OnRefreshMeetings"/>
+                            </StackPanel>
                         </Grid>
 
                         <Grid DockPanel.Dock="Top" Margin="2,0,2,10">
@@ -201,6 +243,7 @@
                         </Grid>
 
                         <ListBox x:Name="MeetingList" SelectionChanged="OnMeetingSelected"
+                                 SelectionMode="Extended"
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListBox.ItemContainerStyle>
                                 <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
@@ -211,9 +254,19 @@
                             </ListBox.ItemContainerStyle>
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
-                                    <Border Background="{StaticResource PanelAlt}"
-                                            BorderBrush="{StaticResource Border}" BorderThickness="1"
-                                            CornerRadius="8" Padding="10">
+                                    <Border BorderThickness="1.5" CornerRadius="8" Padding="10">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="{StaticResource PanelAlt}"/>
+                                                <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=IsSelected}" Value="True">
+                                                        <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+                                                        <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
                                         <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*"/>
@@ -274,7 +327,15 @@
                     <DockPanel>
                         <Grid DockPanel.Dock="Top" Margin="2,0,2,10">
                             <TextBlock x:Name="ViewerTitle" Text="No meeting selected"
-                                       FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center"/>
+                                       FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center"
+                                       HorizontalAlignment="Left"
+                                       Cursor="Hand" ToolTip="Click to rename"
+                                       MouseLeftButtonUp="OnRenameMeetingClick"/>
+                            <TextBox x:Name="ViewerTitleEdit" FontWeight="SemiBold" FontSize="14"
+                                     VerticalAlignment="Center" HorizontalAlignment="Left"
+                                     MinWidth="220" Visibility="Collapsed"
+                                     KeyDown="OnViewerTitleEditKeyDown"
+                                     LostFocus="OnViewerTitleEditLostFocus"/>
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                                 <Button x:Name="ChangeSpeakerButton" Content="Change speaker"
                                         Padding="9,4" Visibility="Collapsed" Click="OnChangeSpeaker"/>
@@ -330,6 +391,30 @@
                                     <Button Content="•" Width="28" Padding="0" Margin="4,0,0,0"
                                             Command="ToggleBullets" CommandTarget="{Binding ElementName=MeetingNotesBox}"/>
                                 </StackPanel>
+                                <Border x:Name="ScreenshotsPanel" DockPanel.Dock="Bottom"
+                                        Style="{StaticResource Card}" Padding="8" Margin="4,10,0,0"
+                                        Visibility="Collapsed">
+                                    <DockPanel>
+                                        <Grid DockPanel.Dock="Top" Margin="0,0,0,6">
+                                            <TextBlock Text="Screenshots" FontWeight="SemiBold" FontSize="12"/>
+                                            <TextBlock x:Name="ScreenshotCounter" HorizontalAlignment="Right"
+                                                       FontSize="11" Foreground="{StaticResource Dim}"/>
+                                        </Grid>
+                                        <Grid Height="170">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Button x:Name="ScreenshotPrevButton" Grid.Column="0" Content="◀"
+                                                    Width="28" VerticalAlignment="Center" Click="OnScreenshotPrev"/>
+                                            <Image x:Name="ScreenshotImage" Grid.Column="1" Stretch="Uniform"
+                                                   Margin="6,0"/>
+                                            <Button x:Name="ScreenshotNextButton" Grid.Column="2" Content="▶"
+                                                    Width="28" VerticalAlignment="Center" Click="OnScreenshotNext"/>
+                                        </Grid>
+                                    </DockPanel>
+                                </Border>
                                 <Grid>
                                     <RichTextBox x:Name="MeetingNotesBox" IsEnabled="False"
                                                  Background="{StaticResource Panel}"

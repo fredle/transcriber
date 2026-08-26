@@ -221,6 +221,43 @@ public static class MeetingStore
     }
 
     /// <summary>
+    /// Change a meeting's stored title, by rewriting the meeting_title field
+    /// on its session_metadata line. A recording from before that line
+    /// existed gets one inserted instead.
+    /// </summary>
+    public static void RenameMeeting(string dir, string title)
+    {
+        title = title.Trim();
+        if (title.Length == 0)
+            throw new ArgumentException("Enter a meeting name.");
+
+        var path = Path.Combine(dir, TranscriptFileName);
+        var lines = new List<string>(ReadLinesShared(path));
+
+        var index = lines.FindIndex(l => l.Trim().Length > 0);
+        var node = index >= 0 ? JsonNode.Parse(lines[index])?.AsObject() : null;
+        if (node != null && node["type"]?.GetValue<string>() == "session_metadata")
+        {
+            node["meeting_title"] = title;
+            lines[index] = node.ToJsonString();
+        }
+        else
+        {
+            lines.Insert(0, JsonSerializer.Serialize(new
+            {
+                session_start = (ParseFolderStamp(Path.GetFileName(dir)) ?? DateTime.Now).ToString("o"),
+                type = "session_metadata",
+                meeting_title = title,
+                engine = "whisper",
+            }));
+        }
+
+        var tmp = path + ".tmp";
+        File.WriteAllLines(tmp, lines);
+        File.Move(tmp, path, overwrite: true);
+    }
+
+    /// <summary>
     /// Read a transcript without fighting the writer. A recording in progress
     /// holds its own transcript open for writing, and the default share mode
     /// used by File.ReadLines conflicts with that - which previously threw
@@ -421,6 +458,16 @@ public static class MeetingStore
         File.Move(tmp, path, overwrite: true);
     }
 
+    /// <summary>
+    /// Whether a recording has no transcript lines and no notes, so keeping
+    /// it around would only clutter the meeting list.
+    /// </summary>
+    public static bool IsEmpty(string dir)
+    {
+        if (ReadTranscript(dir).Count > 0) return false;
+        return !File.Exists(Path.Combine(dir, NotesFileName));
+    }
+
     /// <summary>Rich-text notes for a meeting, or null if none have been saved yet.</summary>
     public static byte[]? LoadNotes(string dir)
     {
@@ -443,6 +490,165 @@ public static class MeetingStore
         var tmp = path + ".tmp";
         File.WriteAllBytes(tmp, rtfBytes);
         File.Move(tmp, path, overwrite: true);
+    }
+
+    /// <summary>Remove a meeting's saved notes, e.g. once the user has cleared them back to empty.</summary>
+    public static void DeleteNotes(string dir)
+    {
+        var path = Path.Combine(dir, NotesFileName);
+        if (File.Exists(path)) File.Delete(path);
+    }
+
+    /// <summary>
+    /// Save a screenshot into a meeting's folder, timestamped so several can
+    /// coexist. Returns the saved path, or null if the folder has gone.
+    /// </summary>
+    public static string? SaveScreenshot(string dir, byte[] pngBytes)
+    {
+        if (!Directory.Exists(dir)) return null;
+        var path = Path.Combine(dir, $"screenshot_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+        File.WriteAllBytes(path, pngBytes);
+        return path;
+    }
+
+    /// <summary>Screenshots saved for a meeting, oldest first (the timestamped filenames sort chronologically).</summary>
+    public static List<string> GetScreenshots(string dir)
+    {
+        if (!Directory.Exists(dir)) return new List<string>();
+        var files = Directory.GetFiles(dir, "screenshot_*.png");
+        Array.Sort(files, StringComparer.Ordinal);
+        return files.ToList();
+    }
+
+    /// <summary>
+    /// Merge several recordings into one new recording, interleaving their
+    /// transcript lines chronologically by wall-clock timestamp. Diarised
+    /// speaker labels are remapped per source meeting so an unrelated
+    /// "Speaker A" from one meeting is never conflated with "Speaker A" from
+    /// another. Notes aren't handled here since merging RTF needs WPF's
+    /// FlowDocument, which this class doesn't otherwise depend on - the
+    /// caller merges those separately and calls SaveNotes on the result.
+    /// The source recordings are moved to the Recycle Bin once the merge
+    /// succeeds, the same as a regular delete.
+    /// </summary>
+    public static string MergeMeetings(IReadOnlyList<Meeting> meetings, string title)
+    {
+        if (meetings.Count < 2)
+            throw new ArgumentException("Select at least two meetings to merge.");
+
+        var ordered = meetings.OrderBy(m => m.Started ?? DateTime.MaxValue).ToList();
+
+        // Collect every non-metadata line from every source, tagged with
+        // which meeting it came from so OTHER speaker labels can be
+        // remapped without colliding across sources.
+        var tagged = new List<(JsonObject Node, int MeetingIndex, DateTime Sort)>();
+        for (var mi = 0; mi < ordered.Count; mi++)
+        {
+            var path = Path.Combine(ordered[mi].Path, TranscriptFileName);
+            if (!File.Exists(path)) continue;
+
+            var index = -1;
+            foreach (var raw in ReadLinesShared(path))
+            {
+                index++;
+                var line = raw.Trim();
+                if (line.Length == 0) continue;
+
+                JsonObject? node;
+                try { node = JsonNode.Parse(line)?.AsObject(); }
+                catch (JsonException) { continue; }
+                if (node == null) continue;
+                if (node["type"]?.GetValue<string>() == "session_metadata") continue;
+
+                var stampText = node["timestamp"]?.GetValue<string>();
+                var sort = DateTime.TryParse(stampText, out var parsed)
+                    ? parsed
+                    : (ordered[mi].Started ?? DateTime.MinValue).AddMilliseconds(index);
+                tagged.Add((node, mi, sort));
+            }
+        }
+
+        tagged.Sort((a, b) => a.Sort.CompareTo(b.Sort));
+
+        // Assign a globally unique diarisation letter to each (source
+        // meeting, original label) pair.
+        var labelMap = new Dictionary<(int, string), string>();
+        var usedLetters = new HashSet<string>();
+        string NextLetter()
+        {
+            var letter = Enumerable.Range('A', 26).Select(c => ((char)c).ToString())
+                .FirstOrDefault(l => !usedLetters.Contains(l))
+                ?? Guid.NewGuid().ToString("N")[..4].ToUpperInvariant();
+            usedLetters.Add(letter);
+            return letter;
+        }
+
+        foreach (var (node, mi, _) in tagged)
+        {
+            var speaker = node["speaker"]?.GetValue<string>();
+            var label = node["speaker_label"]?.GetValue<string>();
+            if (speaker != "[OTHER]" || string.IsNullOrEmpty(label) || label == "PENDING") continue;
+
+            var key = (mi, label);
+            if (!labelMap.TryGetValue(key, out var mapped))
+            {
+                mapped = NextLetter();
+                labelMap[key] = mapped;
+            }
+            node["speaker_label"] = mapped;
+        }
+
+        // Merge custom speaker names the same way; first meeting to name a
+        // (remapped) speaker wins if two sources somehow disagree.
+        var mergedNames = new Dictionary<string, string>();
+        for (var mi = 0; mi < ordered.Count; mi++)
+        {
+            foreach (var (key, name) in LoadSpeakerNames(ordered[mi].Path))
+            {
+                if (key == "PENDING") continue;
+                var newKey = key == "ME" ? "ME" : labelMap.TryGetValue((mi, key), out var m) ? m : key;
+                if (!mergedNames.ContainsKey(newKey)) mergedNames[newKey] = name;
+            }
+        }
+
+        var start = ordered[0].Started ?? DateTime.Now;
+        var folder = CreateRecordingFolder(ordered[0].Group, start);
+
+        var outLines = new List<string>
+        {
+            JsonSerializer.Serialize(new
+            {
+                session_start = start.ToString("o"),
+                session_id = Path.GetFileName(folder)["recording_".Length..],
+                type = "session_metadata",
+                meeting_title = title,
+                engine = ordered[0].Engine,
+            }),
+        };
+        outLines.AddRange(tagged.Select(t => t.Node.ToJsonString()));
+        File.WriteAllLines(Path.Combine(folder, TranscriptFileName), outLines);
+
+        if (mergedNames.Count > 0) SaveSpeakerNames(folder, mergedNames);
+
+        foreach (var m in ordered) DeleteRecording(m.Path);
+
+        return folder;
+    }
+
+    private static string CreateRecordingFolder(string group, DateTime start)
+    {
+        var baseDir = group.Length == 0 ? EnsureRoot() : Path.Combine(EnsureRoot(), group);
+        Directory.CreateDirectory(baseDir);
+        var stamp = start.ToString("yyyyMMdd_HHmmss");
+        var folder = Path.Combine(baseDir, $"recording_{stamp}");
+        var suffix = 1;
+        while (Directory.Exists(folder))
+        {
+            suffix++;
+            folder = Path.Combine(baseDir, $"recording_{stamp}_{suffix}");
+        }
+        Directory.CreateDirectory(folder);
+        return folder;
     }
 
     /// <summary>

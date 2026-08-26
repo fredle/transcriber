@@ -100,5 +100,6 @@ public sealed class Settings
                 JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch (IOException) { /* settings are a convenience, not critical */ }
+        catch (UnauthorizedAccessException) { }
     }
 }
