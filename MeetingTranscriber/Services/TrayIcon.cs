@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
 namespace MeetingTranscriber.Services;
@@ -15,14 +16,19 @@ public sealed class TrayIcon : IDisposable
     private readonly ToolStripMenuItem _showItem;
     private readonly ToolStripMenuItem _transcribeItem;
     private readonly ToolStripMenuItem _autoStartItem;
+    private readonly ToolStripMenuItem _autoStopItem;
+    private readonly Icon _idleIcon;
+    private readonly Icon _recordingIcon;
+    private bool? _shownAsRecording;
 
     public event Action? ShowRequested;
     public event Action? ToggleTranscribeRequested;
     public event Action? OpenFolderRequested;
     public event Action? ExitRequested;
     public event Action<bool>? AutoStartChanged;
+    public event Action<bool>? AutoStopChanged;
 
-    public TrayIcon(bool autoStart)
+    public TrayIcon(bool autoStart, bool autoStop)
     {
         _showItem = new ToolStripMenuItem("Open Teeline",
             null, (_, _) => ShowRequested?.Invoke()) { Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold) };
@@ -34,23 +40,33 @@ public sealed class TrayIcon : IDisposable
             Checked = autoStart,
         };
         _autoStartItem.CheckedChanged += (_, _) => AutoStartChanged?.Invoke(_autoStartItem.Checked);
+        _autoStopItem = new ToolStripMenuItem("Stop automatically when the call ends")
+        {
+            CheckOnClick = true,
+            Checked = autoStop,
+        };
+        _autoStopItem.CheckedChanged += (_, _) => AutoStopChanged?.Invoke(_autoStopItem.Checked);
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(_showItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_transcribeItem);
         menu.Items.Add(_autoStartItem);
+        menu.Items.Add(_autoStopItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open transcripts folder",
             null, (_, _) => OpenFolderRequested?.Invoke()));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => ExitRequested?.Invoke()));
 
+        _idleIcon = LoadAppIcon();
+        _recordingIcon = BuildRecordingIcon(_idleIcon);
+
         _icon = new NotifyIcon
         {
             // The app's own icon, taken from the executable, so the tray
             // matches the taskbar and the shortcut.
-            Icon = LoadAppIcon(),
+            Icon = _idleIcon,
             Text = "Teeline",
             Visible = true,
             ContextMenuStrip = menu,
@@ -76,10 +92,38 @@ public sealed class TrayIcon : IDisposable
         return SystemIcons.Application;
     }
 
-    /// <summary>Reflect state in the tooltip and the menu's wording.</summary>
+    /// <summary>
+    /// Badge the base icon with a red recording dot in the bottom-right
+    /// corner, so transcribing-in-progress is visible at a glance in the
+    /// notification area without having to hover for the tooltip.
+    /// </summary>
+    private static Icon BuildRecordingIcon(Icon baseIcon)
+    {
+        var size = baseIcon.Width;
+        using var bitmap = baseIcon.ToBitmap();
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+        var dotSize = Math.Max(6, size / 2);
+        var rect = new RectangleF(size - dotSize, size - dotSize, dotSize, dotSize);
+        graphics.FillEllipse(Brushes.White, rect);
+        rect.Inflate(-dotSize * 0.12f, -dotSize * 0.12f);
+        graphics.FillEllipse(Brushes.Red, rect);
+
+        var handle = bitmap.GetHicon();
+        return Icon.FromHandle(handle);
+    }
+
+    /// <summary>Reflect state in the tooltip, the menu's wording, and the icon itself.</summary>
     public void Update(bool transcribing, bool inCall, string? meetingTitle)
     {
         _transcribeItem.Text = transcribing ? "Stop transcribing" : "Start transcribing";
+
+        if (_shownAsRecording != transcribing)
+        {
+            _icon.Icon = transcribing ? _recordingIcon : _idleIcon;
+            _shownAsRecording = transcribing;
+        }
 
         var status = transcribing ? "Transcribing" : inCall ? "Teams call in progress" : "Idle";
         if (!string.IsNullOrWhiteSpace(meetingTitle)) status += $" - {meetingTitle}";
@@ -114,9 +158,16 @@ public sealed class TrayIcon : IDisposable
         if (_autoStartItem.Checked != value) _autoStartItem.Checked = value;
     }
 
+    public void SetAutoStop(bool value)
+    {
+        if (_autoStopItem.Checked != value) _autoStopItem.Checked = value;
+    }
+
     public void Dispose()
     {
         _icon.Visible = false;
         _icon.Dispose();
+        _idleIcon.Dispose();
+        _recordingIcon.Dispose();
     }
 }

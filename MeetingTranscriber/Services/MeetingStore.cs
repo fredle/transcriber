@@ -615,7 +615,8 @@ public static class MeetingStore
     /// transcript lines chronologically by wall-clock timestamp. Diarised
     /// speaker labels are remapped per source meeting so an unrelated
     /// "Speaker A" from one meeting is never conflated with "Speaker A" from
-    /// another. Notes aren't handled here since merging RTF needs WPF's
+    /// another. Screenshots and attendee join/leave events are carried over
+    /// too. Notes aren't handled here since merging RTF needs WPF's
     /// FlowDocument, which this class doesn't otherwise depend on - the
     /// caller merges those separately and calls SaveNotes on the result.
     /// The source recordings are moved to the Recycle Bin once the merge
@@ -719,6 +720,30 @@ public static class MeetingStore
         File.WriteAllLines(Path.Combine(folder, TranscriptFileName), outLines);
 
         if (mergedNames.Count > 0) SaveSpeakerNames(folder, mergedNames);
+
+        // Screenshots are just timestamped files, so copy them over as-is;
+        // collisions are only possible if two sources raced to the same
+        // millisecond, in which case a numeric suffix keeps both.
+        foreach (var m in ordered)
+        {
+            foreach (var src in GetScreenshots(m.Path))
+            {
+                var dest = Path.Combine(folder, Path.GetFileName(src));
+                var suffix = 1;
+                while (File.Exists(dest))
+                    dest = Path.Combine(folder, $"{Path.GetFileNameWithoutExtension(src)}_{suffix++}{Path.GetExtension(src)}");
+                File.Copy(src, dest);
+            }
+        }
+
+        // Attendee sightings are re-merged from every source in chronological
+        // order, same as the transcript lines above.
+        var attendeeEvents = ordered
+            .SelectMany(m => GetAttendeeEvents(m.Path))
+            .OrderBy(e => e.Timestamp)
+            .ToList();
+        foreach (var e in attendeeEvents)
+            AppendAttendeeEvent(folder, e.Name, e.Joined, e.Timestamp);
 
         foreach (var m in ordered) DeleteRecording(m.Path);
 

@@ -6,7 +6,7 @@
         Background="{StaticResource WindowBg}"
         TextOptions.TextFormattingMode="Display">
 
-    <TabControl Background="{StaticResource WindowBg}" BorderThickness="0" Margin="14,10,14,14">
+    <TabControl x:Name="MainTabControl" Background="{StaticResource WindowBg}" BorderThickness="0" Margin="14,10,14,14">
 
         <!-- ── Transcribe ─────────────────────────────────────────────── -->
         <TabItem Header="Transcribe">
@@ -209,6 +209,8 @@
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                                 <Button x:Name="MergeMeetingsButton" Content="Merge" Margin="0,0,6,0"
                                         Padding="9,4" Visibility="Collapsed" Click="OnMergeMeetings"/>
+                                <Button x:Name="DeleteMeetingsButton" Content="Delete" Margin="0,0,6,0"
+                                        Padding="9,4" Visibility="Collapsed" Click="OnDeleteMeetings"/>
                                 <Button Content="Refresh" Padding="9,4" Click="OnRefreshMeetings"/>
                             </StackPanel>
                         </Grid>
@@ -482,6 +484,17 @@
                             <PasswordBox x:Name="ApiKeyBox" Grid.Column="0" VerticalAlignment="Center"/>
                             <Button Grid.Column="1" Content="Save key" Margin="8,0,0,0" Click="OnSaveKey"/>
                         </Grid>
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Padding="14,12" Margin="0,10,0,0">
+                    <StackPanel>
+                        <TextBlock Text="Teams calls" FontWeight="SemiBold" FontSize="14"/>
+                        <TextBlock Text="Automatically start or stop transcribing as Teams calls begin and end."
+                                   Foreground="{StaticResource Dim}" FontSize="11" Margin="0,4,0,10"/>
+                        <CheckBox x:Name="AutoStartOnCallCheck" Content="Start automatically when a Teams call begins"
+                                  Checked="OnAutoStartOnCallChanged" Unchecked="OnAutoStartOnCallChanged"/>
+                        <CheckBox x:Name="AutoStopOnCallEndCheck" Content="Stop automatically when the Teams call ends"
+                                  Margin="0,8,0,0" Checked="OnAutoStopOnCallEndChanged" Unchecked="OnAutoStopOnCallEndChanged"/>
                     </StackPanel>
                 </Border>
             </StackPanel>

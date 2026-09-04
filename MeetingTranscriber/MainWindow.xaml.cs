@@ -90,6 +90,8 @@ public partial class MainWindow : Window
             ScreenshotCounter, ScreenshotPrevButton, ScreenshotNextButton, Log);
 
         ApiKeyBox.Password = _settings.ApiKey;
+        AutoStartOnCallCheck.IsChecked = _settings.AutoStartOnCall;
+        AutoStopOnCallEndCheck.IsChecked = _settings.AutoStopOnCallEnd;
 
         // Enumerating audio endpoints and scanning the transcript folders are
         // the slow part of startup. Doing them here would hold the window off
@@ -153,7 +155,7 @@ public partial class MainWindow : Window
 
     private void SetUpTray()
     {
-        _tray = new TrayIcon(_settings.AutoStartOnCall);
+        _tray = new TrayIcon(_settings.AutoStartOnCall, _settings.AutoStopOnCallEnd);
         _tray.ShowRequested += RestoreFromTray;
         _tray.ToggleTranscribeRequested += () => OnToggleRecording(this, new RoutedEventArgs());
         _tray.OpenFolderRequested += () =>
@@ -169,11 +171,26 @@ public partial class MainWindow : Window
             // to leave the strip permanently unable to reopen.
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (_settings.AutoStartOnCall == value) return;
                 _settings.AutoStartOnCall = value;
                 _settings.Save();
+                AutoStartOnCallCheck.IsChecked = value;
                 Log(value
                     ? "Will start transcribing automatically when a Teams call begins."
                     : "Automatic start on a Teams call is off.");
+            }), DispatcherPriority.Background);
+        };
+        _tray.AutoStopChanged += value =>
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_settings.AutoStopOnCallEnd == value) return;
+                _settings.AutoStopOnCallEnd = value;
+                _settings.Save();
+                AutoStopOnCallEndCheck.IsChecked = value;
+                Log(value
+                    ? "Will stop transcribing automatically when the Teams call ends."
+                    : "Automatic stop on call end is off.");
             }), DispatcherPriority.Background);
         };
         _tray.ExitRequested += () =>
@@ -409,6 +426,30 @@ public partial class MainWindow : Window
         Log(_settings.ApiKey.Length > 0 ? "API key saved." : "API key cleared.");
     }
 
+    private void OnAutoStartOnCallChanged(object sender, RoutedEventArgs e)
+    {
+        var value = AutoStartOnCallCheck.IsChecked == true;
+        if (_settings.AutoStartOnCall == value) return;
+        _settings.AutoStartOnCall = value;
+        _settings.Save();
+        _tray?.SetAutoStart(value);
+        Log(value
+            ? "Will start transcribing automatically when a Teams call begins."
+            : "Automatic start on a Teams call is off.");
+    }
+
+    private void OnAutoStopOnCallEndChanged(object sender, RoutedEventArgs e)
+    {
+        var value = AutoStopOnCallEndCheck.IsChecked == true;
+        if (_settings.AutoStopOnCallEnd == value) return;
+        _settings.AutoStopOnCallEnd = value;
+        _settings.Save();
+        _tray?.SetAutoStop(value);
+        Log(value
+            ? "Will stop transcribing automatically when the Teams call ends."
+            : "Automatic stop on call end is off.");
+    }
+
     // ── Recording ─────────────────────────────────────────────────────────
 
     private async void OnToggleRecording(object sender, RoutedEventArgs e)
@@ -508,11 +549,18 @@ public partial class MainWindow : Window
             _liveAttendeeLog.Clear();
             LiveAttendeeLogList.ItemsSource = null;
             LiveAttendeesPanel.Visibility = Visibility.Collapsed;
-            if (endedFolder != null && MeetingStore.IsEmpty(endedFolder))
-                MeetingStore.DeleteRecording(endedFolder);
+            LiveTranscript.Document.Blocks.Clear();
+            var deleted = endedFolder != null && MeetingStore.IsEmpty(endedFolder);
+            if (deleted) MeetingStore.DeleteRecording(endedFolder!);
             SetRecordingUi(false);
             RefreshMeetings();
-            if (_openMeeting != null) LoadMeetingNotes(_openMeeting);
+            if (!deleted && endedFolder != null)
+            {
+                MeetingList.SelectedItem = MeetingList.Items
+                    .OfType<Meeting>().FirstOrDefault(m => SamePath(m.Path, endedFolder));
+                MainTabControl.SelectedIndex = 1;
+            }
+            else if (_openMeeting != null) LoadMeetingNotes(_openMeeting);
             UpdateMeetingNotesEditability();
         }
     }
@@ -690,34 +738,59 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// React to a call *starting*, which is the moment worth acting on. This
-    /// keeps working while the window is hidden, which is the point of living
-    /// in the notification area.
+    /// React to a call *starting* or *ending*, the moments worth acting on.
+    /// This keeps working while the window is hidden, which is the point of
+    /// living in the notification area.
     /// </summary>
     private void HandleCallTransition(bool inCall, string? title)
     {
-        if (!inCall || _wasInCall || _session != null) return;
+        // The window locked onto as "the meeting" is stale once the call is
+        // over - the next meeting may well run in a different one.
+        if (!inCall && _wasInCall) TeamsMonitor.ResetMeetingWindow();
 
-        if (_settings.AutoStartOnCall)
+        if (inCall && !_wasInCall && _session == null)
         {
-            Log("Teams call started - beginning transcription automatically.");
-            _tray?.Notify("Transcribing", title is null
-                ? "A Teams call started, so transcription has begun."
-                : $"Transcribing \"{title}\".");
-            OnToggleRecording(this, new RoutedEventArgs());
+            if (_settings.AutoStartOnCall)
+            {
+                Log("Teams call started - beginning transcription automatically.");
+                _tray?.Notify("Transcribing", title is null
+                    ? "A Teams call started, so transcription has begun."
+                    : $"Transcribing \"{title}\".");
+                OnToggleRecording(this, new RoutedEventArgs());
+            }
+            else
+            {
+                // Prompting rather than recording uninvited: starting to record a
+                // meeting should stay a deliberate act.
+                _tray?.Notify("Teams call detected", title is null
+                    ? "Click here to start transcribing."
+                    : $"Click here to start transcribing \"{title}\".",
+                    onClick: () =>
+                    {
+                        RestoreFromTray();
+                        OnToggleRecording(this, new RoutedEventArgs());
+                    });
+            }
         }
-        else
+        else if (!inCall && _wasInCall && _session != null)
         {
-            // Prompting rather than recording uninvited: starting to record a
-            // meeting should stay a deliberate act.
-            _tray?.Notify("Teams call detected", title is null
-                ? "Click here to start transcribing."
-                : $"Click here to start transcribing \"{title}\".",
-                onClick: () =>
-                {
-                    RestoreFromTray();
-                    OnToggleRecording(this, new RoutedEventArgs());
-                });
+            if (_settings.AutoStopOnCallEnd)
+            {
+                Log("Teams call ended - stopping transcription automatically.");
+                _tray?.Notify("Transcribing stopped", "The Teams call ended, so transcription has stopped.");
+                OnToggleRecording(this, new RoutedEventArgs());
+            }
+            else
+            {
+                // Prompting rather than stopping uninvited - same deliberate-act
+                // stance as starting.
+                _tray?.Notify("Teams call ended", "Click here to stop transcribing.",
+                    onClick: () =>
+                    {
+                        RestoreFromTray();
+                        OnToggleRecording(this, new RoutedEventArgs());
+                    });
+            }
         }
     }
 
@@ -1011,6 +1084,8 @@ public partial class MainWindow : Window
         var selectedCount = MeetingList.SelectedItems.Count;
         MergeMeetingsButton.Visibility = selectedCount >= 2 ? Visibility.Visible : Visibility.Collapsed;
         MergeMeetingsButton.Content = $"Merge {selectedCount}";
+        DeleteMeetingsButton.Visibility = selectedCount >= 2 ? Visibility.Visible : Visibility.Collapsed;
+        DeleteMeetingsButton.Content = $"Delete {selectedCount}";
 
         if (MeetingList.SelectedItem is not Meeting meeting)
         {
@@ -1348,6 +1423,58 @@ public partial class MainWindow : Window
         using var outStream = new MemoryStream();
         new TextRange(merged.ContentStart, merged.ContentEnd).Save(outStream, DataFormats.Rtf);
         MeetingStore.SaveNotes(destFolder, outStream.ToArray());
+    }
+
+    /// <summary>
+    /// Delete every meeting currently multi-selected in Recent Meetings, each
+    /// moved to the Recycle Bin individually so a partial failure still
+    /// leaves the rest deleted rather than aborting the whole batch.
+    /// </summary>
+    private void OnDeleteMeetings(object sender, RoutedEventArgs e)
+    {
+        var selected = MeetingList.SelectedItems.OfType<Meeting>().ToList();
+        if (selected.Count < 2) return;
+
+        if (_session != null && selected.Any(m => SamePath(_session.Folder, m.Path)))
+        {
+            MessageBox.Show(this,
+                "One of the selected meetings is still being recorded. Stop transcribing first, then delete it.",
+                "Recording in progress", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var preview = string.Join(Environment.NewLine, selected.Take(5).Select(m => m.Title));
+        if (selected.Count > 5) preview += $"{Environment.NewLine}...and {selected.Count - 5} more";
+
+        var confirm = MessageBox.Show(this,
+            $"Delete {selected.Count} transcriptions?\n\n{preview}\n\n" +
+            "They go to the Recycle Bin, so they can be restored.",
+            "Delete transcriptions", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+        if (confirm != MessageBoxResult.Yes) return;
+
+        var failed = new List<string>();
+        foreach (var meeting in selected)
+        {
+            try
+            {
+                MeetingStore.DeleteRecording(meeting.Path);
+                Log($"Deleted {meeting.Folder} (moved to Recycle Bin).");
+            }
+            catch (Exception ex)
+            {
+                failed.Add($"{meeting.Folder}: {ex.Message}");
+            }
+        }
+
+        if (_openMeeting != null && selected.Any(m => SamePath(m.Path, _openMeeting.Path)))
+            ResetViewer(flushNotes: false);
+
+        RefreshFolders();
+        RefreshMeetings();
+
+        if (failed.Count > 0)
+            MessageBox.Show(this, $"Some transcriptions could not be deleted:\n\n{string.Join("\n", failed)}",
+                "Delete failed", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private void OnDeleteLines(object sender, RoutedEventArgs e)

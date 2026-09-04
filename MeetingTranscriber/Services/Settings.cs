@@ -20,6 +20,9 @@ public sealed class Settings
     /// <summary>Begin transcribing by itself when a Teams call starts. Off by
     /// default: recording a meeting should be a deliberate act.</summary>
     [JsonPropertyName("autoStartOnCall")] public bool AutoStartOnCall { get; set; }
+    /// <summary>Stop transcribing by itself when the Teams call ends. Off by
+    /// default, matching AutoStartOnCall's deliberate-act stance.</summary>
+    [JsonPropertyName("autoStopOnCallEnd")] public bool AutoStopOnCallEnd { get; set; }
 
     /// <summary>
     /// %AppData%\Teeline, migrating an older %AppData%\Kettle or, before

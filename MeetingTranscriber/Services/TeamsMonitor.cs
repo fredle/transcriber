@@ -101,12 +101,36 @@ public static class TeamsMonitor
 
     /// <summary>
     /// Best-effort meeting name scraped from Teams window titles, which take
-    /// the form "&lt;name&gt; | Microsoft Teams".
+    /// the form "&lt;name&gt; | Microsoft Teams". Null while the only Teams
+    /// windows on screen are shell pages (Calendar, Chat, ...) rather than a
+    /// meeting, so bringing the main window to the front never reads as a
+    /// differently-named meeting.
     /// </summary>
-    public static string? GetMeetingTitle() => GetBestMeetingWindow()?.Name;
+    public static string? GetMeetingTitle()
+    {
+        var window = GetBestMeetingWindow();
+        return window is { IsShell: false } ? window.Value.Name : null;
+    }
 
-    /// <summary>Window handle of the same best-guess meeting window, for screenshotting. IntPtr.Zero if none is found.</summary>
+    /// <summary>
+    /// Window handle of the same best-guess meeting window, for
+    /// screenshotting. IntPtr.Zero if none is found. Unlike
+    /// <see cref="GetMeetingTitle"/> this falls back to the Teams shell
+    /// window when no meeting window can be identified - a screenshot of the
+    /// wrong Teams window is a minor annoyance, whereas a shell page's title
+    /// would look like a whole new meeting.
+    /// </summary>
     public static IntPtr GetMeetingWindowHandle() => GetBestMeetingWindow()?.Hwnd ?? IntPtr.Zero;
+
+    /// <summary>
+    /// Forget which window was locked onto as "the meeting", so the next
+    /// call picks afresh. Called when a call ends: the next meeting may well
+    /// run in a different window.
+    /// </summary>
+    public static void ResetMeetingWindow()
+    {
+        lock (StickyLock) _stickyHwnd = IntPtr.Zero;
+    }
 
     // Trailing relationship label Teams appends to a tile's accessible name
     // for contacts outside the org, e.g. "Tyler Cloherty External unfamiliar".
@@ -165,21 +189,93 @@ public static class TeamsMonitor
         return names.Distinct().ToList();
     }
 
-    private static (IntPtr Hwnd, string Name)? GetBestMeetingWindow()
+
+    // Pages of the Teams shell - its main window, titled
+    // "<page> | <account> | Microsoft Teams" - as opposed to a meeting.
+    // Meetings run in their own window, so a shell page is never the
+    // meeting: without this, simply clicking back to the main Teams window
+    // put it at the top of the Z-order (which is the order EnumWindows
+    // reports) and its title read as a brand-new meeting, splitting the
+    // recording in two.
+    private static readonly HashSet<string> ShellPages = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "activity", "apps", "calendar", "calls", "chat", "chats", "communities",
+        "files", "help", "microsoft teams", "onenote", "planner", "search",
+        "settings", "store", "tasks", "teams", "viva",
+    };
+
+    // The window last identified as the meeting. Held on to so that whatever
+    // else comes and goes in front of it, the meeting stays put for the life
+    // of the call. Guarded because the UI timer and the recording's title
+    // watcher both poll this class from their own threads.
+    private static readonly object StickyLock = new();
+    private static IntPtr _stickyHwnd = IntPtr.Zero;
+
+    /// <summary>
+    /// The Teams window taken to be the current meeting, and whether it is
+    /// really just a shell page (i.e. no meeting window could be found).
+    ///
+    /// Sticky: once a window has been identified as the meeting it keeps that
+    /// role for as long as it is still around and still named like a meeting,
+    /// regardless of which Teams window happens to be in front. A genuine
+    /// move to another meeting still comes through, either as a new title on
+    /// that same window or - if it closed - as a fresh pick.
+    /// </summary>
+    private static (IntPtr Hwnd, string Name, bool IsShell)? GetBestMeetingWindow()
     {
         var candidates = GetMeetingWindowCandidates();
+        if (candidates.Count == 0)
+        {
+            lock (StickyLock) _stickyHwnd = IntPtr.Zero;
+            return null;
+        }
 
-        // Prefer something that looks like a meeting over a chat window.
-        foreach (var c in candidates)
+        lock (StickyLock)
+        {
+            if (_stickyHwnd != IntPtr.Zero)
+            {
+                foreach (var c in candidates)
+                {
+                    if (c.Hwnd != _stickyHwnd) continue;
+                    // Navigating the window we locked onto away to a shell
+                    // page means the meeting isn't there any more - fall
+                    // through and pick again (the compact-view window that
+                    // Teams leaves behind is the usual answer).
+                    if (IsShellPage(c.Name)) break;
+                    return (c.Hwnd, c.Name, false);
+                }
+            }
+
+            var best = PickMeetingWindow(candidates);
+            _stickyHwnd = best.IsShell ? IntPtr.Zero : best.Hwnd;
+            return best;
+        }
+    }
+
+    private static (IntPtr Hwnd, string Name, bool IsShell) PickMeetingWindow(
+        List<(IntPtr Hwnd, string Name)> candidates)
+    {
+        var meetingWindows = candidates.Where(c => !IsShellPage(c.Name)).ToList();
+        if (meetingWindows.Count == 0)
+            return (candidates[0].Hwnd, candidates[0].Name, true);
+
+        // Prefer a window that says outright that it is a meeting or a call.
+        foreach (var c in meetingWindows)
         {
             var lower = c.Name.ToLowerInvariant();
-            if (lower.Contains("meeting") || lower.Contains("call")) return c;
+            if (lower.Contains("meeting") || lower.Contains("call")) return (c.Hwnd, c.Name, false);
         }
-        foreach (var c in candidates)
-        {
-            if (!c.Name.StartsWith("Chat |", StringComparison.OrdinalIgnoreCase)) return c;
-        }
-        return candidates.Count > 0 ? candidates[0] : null;
+        return (meetingWindows[0].Hwnd, meetingWindows[0].Name, false);
+    }
+
+    /// <summary>
+    /// True for a title whose leading segment names a page of the Teams
+    /// shell, e.g. "Calendar | (External)" or "Chat | Contoso".
+    /// </summary>
+    private static bool IsShellPage(string name)
+    {
+        var firstSegment = name.Split('|')[0].Trim();
+        return ShellPages.Contains(firstSegment);
     }
 
     private static List<(IntPtr Hwnd, string Name)> GetMeetingWindowCandidates()
@@ -189,6 +285,9 @@ public static class TeamsMonitor
         {
             var lower = title.ToLowerInvariant();
             if (!lower.Contains("microsoft teams")) continue;
+            // Rules out a browser tab or Outlook window that merely mentions
+            // Teams in its title.
+            if (!IsTeamsWindow(hwnd)) continue;
 
             foreach (var suffix in new[] { " | microsoft teams", " - microsoft teams" })
             {
@@ -210,6 +309,12 @@ public static class TeamsMonitor
             }
         }
         return candidates;
+    }
+
+    private static bool IsTeamsWindow(IntPtr hwnd)
+    {
+        GetWindowThreadProcessId(hwnd, out var pid);
+        return IsTeamsProcess((int)pid);
     }
 
     private static IEnumerable<(IntPtr Hwnd, string Title)> EnumerateWindows()
@@ -241,4 +346,7 @@ public static class TeamsMonitor
 
     [DllImport("user32.dll")]
     private static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
