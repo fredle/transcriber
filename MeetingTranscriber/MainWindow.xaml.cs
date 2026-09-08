@@ -1097,6 +1097,8 @@ public partial class MainWindow : Window
         OpenFolderButton.Visibility = Visibility.Visible;
         SpeakersButton.Visibility = Visibility.Visible;
         AskButton.Visibility = Visibility.Visible;
+        CopyTranscriptButton.Visibility = Visibility.Visible;
+        CopyTranscriptButton.Content = "Copy transcript";
         DeleteLinesButton.Visibility = Visibility.Collapsed;
         ChangeSpeakerButton.Visibility = Visibility.Collapsed;
 
@@ -1278,6 +1280,7 @@ public partial class MainWindow : Window
         OpenFolderButton.Visibility = Visibility.Collapsed;
         SpeakersButton.Visibility = Visibility.Collapsed;
         AskButton.Visibility = Visibility.Collapsed;
+        CopyTranscriptButton.Visibility = Visibility.Collapsed;
         DeleteLinesButton.Visibility = Visibility.Collapsed;
         ChangeSpeakerButton.Visibility = Visibility.Collapsed;
         MeetingNotesBox.Document.Blocks.Clear();
@@ -1295,6 +1298,42 @@ public partial class MainWindow : Window
         DeleteLinesButton.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
         DeleteLinesButton.Content = count == 1 ? "Delete line" : $"Delete {count} lines";
         ChangeSpeakerButton.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        CopyTranscriptButton.Content = count switch
+        {
+            0 => "Copy transcript",
+            1 => "Copy 1 line",
+            _ => $"Copy {count} lines"
+        };
+    }
+
+    /// <summary>Copy the selected lines, or the whole transcript when nothing is selected.</summary>
+    private void OnCopyTranscript(object sender, RoutedEventArgs e)
+    {
+        if (_openMeeting == null) return;
+
+        var selected = TranscriptList.SelectedItems.OfType<TranscriptLine>().ToList();
+        // Selection order follows the clicks, not the transcript, so restore file order.
+        var lines = selected.Count > 0
+            ? selected.OrderBy(l => l.SourceIndex).ToList()
+            : _openLines.ToList();
+        if (lines.Count == 0)
+        {
+            Log($"{_openMeeting.Folder}: no transcript lines to copy.");
+            return;
+        }
+
+        try
+        {
+            Clipboard.SetText(string.Join(Environment.NewLine, lines.Select(l => l.Display)));
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not copy the transcript: {ex.Message}");
+            return;
+        }
+        Log(selected.Count > 0
+            ? $"Copied {lines.Count} line(s) to the clipboard."
+            : $"Copied the {lines.Count}-line transcript of {_openMeeting.Folder} to the clipboard.");
     }
 
     private void OnOpenFolder(object sender, RoutedEventArgs e)

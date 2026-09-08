@@ -359,6 +359,8 @@
                                 <Button x:Name="DeleteLinesButton" Content="Delete lines" Margin="6,0,0,0"
                                         Foreground="{StaticResource Danger}" Padding="9,4"
                                         Visibility="Collapsed" Click="OnDeleteLines"/>
+                                <Button x:Name="CopyTranscriptButton" Content="Copy transcript" Margin="6,0,0,0"
+                                        Padding="9,4" Visibility="Collapsed" Click="OnCopyTranscript"/>
                                 <Button x:Name="SpeakersButton" Content="Speakers" Margin="6,0,0,0"
                                         Padding="9,4" Visibility="Collapsed" Click="OnManageSpeakers"/>
                                 <Button x:Name="AskButton" Content="Ask about this meeting" Margin="6,0,0,0"
