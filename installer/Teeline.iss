@@ -19,6 +19,14 @@ AppId={{A6E2B6B0-6C1E-4C7B-9A9F-9B9C6D6A6E10}
 AppName={#MyAppName}
 AppVersion={#AppVersion}
 AppPublisher={#MyAppPublisher}
+; Per-user install, no admin/UAC prompt: {autopf}/{group}/{autodesktop} below
+; all resolve to per-user locations (e.g. %LocalAppData%\Programs) once
+; PrivilegesRequired is "lowest" rather than the Inno Setup default of
+; "admin". PrivilegesRequiredOverridesAllowed still lets someone explicitly
+; ask for an admin/machine-wide install (e.g. `TeelineSetup.exe /ALLUSERS`)
+; if they want one, but that is never the default.
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=commandline dialog
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputBaseFilename=TeelineSetup
