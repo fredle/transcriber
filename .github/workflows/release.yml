@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist), e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - name: Determine tag and version
+        id: version
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Inject cloud config
+        shell: pwsh
+        env:
+          BACKEND_URL: ${{ secrets.TEELINE_BACKEND_URL }}
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          $path = "MeetingTranscriber\Services\CloudConfig.cs"
+          $content = Get-Content $path -Raw
+          $content = $content.Replace('__TEELINE_BACKEND_URL__', $env:BACKEND_URL)
+          $content = $content.Replace('__TEELINE_FIREBASE_API_KEY__', $env:FIREBASE_API_KEY)
+          $content = $content.Replace('__TEELINE_GOOGLE_CLIENT_ID__', $env:GOOGLE_CLIENT_ID)
+          $content = $content.Replace('__TEELINE_GOOGLE_CLIENT_SECRET__', $env:GOOGLE_CLIENT_SECRET)
+          Set-Content -Path $path -Value $content -NoNewline
+
+      - name: Publish self-contained build
+        run: >
+          dotnet publish MeetingTranscriber/MeetingTranscriber.csproj
+          -c Release
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:FileVersion=${{ steps.version.outputs.version }}.0
+          -p:AssemblyVersion=${{ steps.version.outputs.version }}.0
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Teeline.exe (Azure Trusted Signing)
+        uses: Azure/artifact-signing-action@v2.0.0
+        with:
+          endpoint: https://weu.codesigning.azure.net/
+          signing-account-name: leatham-signing-account
+          certificate-profile-name: cert-profile
+          files-folder: ${{ github.workspace }}\MeetingTranscriber\bin\Release\net8.0-windows\win-x64\publish
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Zip the portable (no-installer) build
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "MeetingTranscriber\bin\Release\net8.0-windows\win-x64\publish\*" `
+            -DestinationPath "Teeline-${{ steps.version.outputs.tag }}-win-x64.zip"
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DPublishDir=$($PWD)\MeetingTranscriber\bin\Release\net8.0-windows\win-x64\publish" `
+            "/DAppVersion=${{ steps.version.outputs.version }}" `
+            installer\Teeline.iss
+
+      - name: Sign the installer
+        uses: Azure/artifact-signing-action@v2.0.0
+        with:
+          endpoint: https://weu.codesigning.azure.net/
+          signing-account-name: leatham-signing-account
+          certificate-profile-name: cert-profile
+          files-folder: ${{ github.workspace }}\installer\Output
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "installer/Output/TeelineSetup.exe#Teeline installer (recommended)" \
+            "Teeline-${{ steps.version.outputs.tag }}-win-x64.zip#Portable build (no installer)" \
+            --title "Teeline ${{ steps.version.outputs.tag }}" \
+            --generate-notes

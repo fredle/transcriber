@@ -52,3 +52,6 @@ nul
 [Oo]bj/
 dist/
 *.user
+
+# Node (backend/)
+node_modules/

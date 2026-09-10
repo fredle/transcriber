@@ -475,17 +475,44 @@
             <StackPanel Margin="0,0,0,0" VerticalAlignment="Top">
                 <Border Style="{StaticResource Card}" Padding="14,12">
                     <StackPanel>
-                        <TextBlock Text="AssemblyAI API key" FontWeight="SemiBold" FontSize="14"/>
-                        <TextBlock Text="Used to transcribe your meetings. Get a key from assemblyai.com."
-                                   Foreground="{StaticResource Dim}" FontSize="11" Margin="0,4,0,10"/>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <PasswordBox x:Name="ApiKeyBox" Grid.Column="0" VerticalAlignment="Center"/>
-                            <Button Grid.Column="1" Content="Save key" Margin="8,0,0,0" Click="OnSaveKey"/>
-                        </Grid>
+                        <TextBlock Text="Teeline Cloud" FontWeight="SemiBold" FontSize="14"/>
+                        <TextBlock Text="Sign in to transcribe, store and ask questions about your meetings."
+                                   Foreground="{StaticResource Dim}" FontSize="11" Margin="0,4,0,10" TextWrapping="Wrap"/>
+
+                        <!-- Google-branded sign-in button, per Google's identity branding
+                             guidelines: white pill, the standard four-colour "G" mark, and
+                             the fixed "Sign in with Google" label. -->
+                        <Button x:Name="SignInButton" Click="OnSignIn" Padding="0" Cursor="Hand"
+                                HorizontalAlignment="Left" Background="White" BorderBrush="#DADCE0" BorderThickness="1">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border Background="{TemplateBinding Background}"
+                                            BorderBrush="{TemplateBinding BorderBrush}"
+                                            BorderThickness="{TemplateBinding BorderThickness}"
+                                            CornerRadius="4">
+                                        <ContentPresenter/>
+                                    </Border>
+                                </ControlTemplate>
+                            </Button.Template>
+                            <StackPanel Orientation="Horizontal" Margin="1">
+                                <Viewbox Width="18" Height="18" Margin="10,8">
+                                    <Canvas Width="18" Height="18">
+                                        <Path Fill="#4285F4" Data="M17.64,9.20455 C17.64,8.56591 17.5827,7.95273 17.4755,7.36364 L9,7.36364 L9,10.845 L13.8436,10.845 C13.635,11.97 13.0009,12.9232 12.0477,13.5618 L12.0477,15.8195 L14.9564,15.8195 C16.6582,14.2527 17.64,11.9455 17.64,9.20455 Z"/>
+                                        <Path Fill="#34A853" Data="M9,18 C11.43,18 13.4673,17.1941 14.9564,15.8195 L12.0477,13.5618 C11.2418,14.1014 10.2109,14.4205 9,14.4205 C6.65591,14.4205 4.67182,12.8373 3.96364,10.71 L0.957273,10.71 L0.957273,13.0418 C2.43818,15.9832 5.48182,18 9,18 Z"/>
+                                        <Path Fill="#FBBC05" Data="M3.96364,10.71 C3.78364,10.17 3.68136,9.59318 3.68136,9 C3.68136,8.40682 3.78364,7.83 3.96364,7.29 L3.96364,4.95818 L0.957273,4.95818 C0.347727,6.17318 0,7.54773 0,9 C0,10.4523 0.347727,11.8268 0.957273,13.0418 L3.96364,10.71 Z"/>
+                                        <Path Fill="#EA4335" Data="M9,3.57955 C10.3214,3.57955 11.5077,4.03364 12.4405,4.92545 L15.0218,2.34409 C13.4632,0.891818 11.4259,0 9,0 C5.48182,0 2.43818,2.01682 0.957273,4.95818 L3.96364,7.29 C4.67182,5.16273 6.65591,3.57955 9,3.57955 Z"/>
+                                    </Canvas>
+                                </Viewbox>
+                                <TextBlock Text="Sign in with Google" VerticalAlignment="Center"
+                                           Margin="4,0,16,0" FontSize="14" Foreground="#3C4043"/>
+                            </StackPanel>
+                        </Button>
+
+                        <StackPanel x:Name="SignedInPanel" Orientation="Horizontal">
+                            <TextBlock x:Name="AccountStatusText" VerticalAlignment="Center"
+                                       Foreground="{StaticResource Dim}" FontSize="12"/>
+                            <Button x:Name="SignOutButton" Content="Sign out" Margin="12,0,0,0" Click="OnSignOut"/>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
                 <Border Style="{StaticResource Card}" Padding="14,12" Margin="0,10,0,0">

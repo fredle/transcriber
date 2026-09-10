@@ -35,7 +35,7 @@ public sealed class RecordingSession : IAsyncDisposable
     private static readonly TimeSpan AttendeePollInterval = TimeSpan.FromSeconds(5);
     private const int AttendeeStablePolls = 2;
 
-    private readonly string _apiKey;
+    private readonly BackendClient _backend;
     private AudioDevice _micDevice;
     private AudioDevice _speakerDevice;
 
@@ -47,6 +47,7 @@ public sealed class RecordingSession : IAsyncDisposable
     private readonly object _writerLock = new();
     private StreamWriter? _writer;
     private string _folder = "";
+    private string _meetingId = "";
     private string? _currentTitle;
 
     // Guards _presentAttendees/_absentStreaks, which WatchAttendeesAsync
@@ -81,12 +82,15 @@ public sealed class RecordingSession : IAsyncDisposable
             return _presentAttendees.Keys.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    public RecordingSession(string apiKey, AudioDevice mic, AudioDevice speaker)
+    public RecordingSession(BackendClient backend, AudioDevice mic, AudioDevice speaker)
     {
-        _apiKey = apiKey;
+        _backend = backend;
         _micDevice = mic;
         _speakerDevice = speaker;
     }
+
+    /// <summary>Mints a fresh AssemblyAI token via the backend for one stream to connect with.</summary>
+    private Task<string> MintTokenAsync(CancellationToken cancel) => _backend.MintAssemblyAiTokenAsync(cancel);
 
     public async Task StartAsync()
     {
@@ -106,8 +110,8 @@ public sealed class RecordingSession : IAsyncDisposable
         _currentTitle = TeamsMonitor.GetMeetingTitle();
         StartNewSessionFile(_currentTitle, announce: false);
 
-        _micStream = new AssemblyAiStream(_apiKey, micRate, "mic");
-        _speakerStream = new AssemblyAiStream(_apiKey, speakerRate, "speaker");
+        _micStream = new AssemblyAiStream(MintTokenAsync, micRate, "mic");
+        _speakerStream = new AssemblyAiStream(MintTokenAsync, speakerRate, "speaker");
         _micStream.FinalTurn += (text, label, s, e) => WriteLine("ME", label, text, s, e);
         _speakerStream.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
         _micStream.Error += m => Log?.Invoke(m);
@@ -157,7 +161,7 @@ public sealed class RecordingSession : IAsyncDisposable
 
         var capture = new WasapiCapture(mmDevice);
         var rate = capture.WaveFormat.SampleRate;
-        var stream = new AssemblyAiStream(_apiKey, rate, "mic");
+        var stream = new AssemblyAiStream(MintTokenAsync, rate, "mic");
         stream.FinalTurn += (text, label, s, e) => WriteLine("ME", label, text, s, e);
         stream.Error += m => Log?.Invoke(m);
         await stream.StartAsync().ConfigureAwait(false);
@@ -187,7 +191,7 @@ public sealed class RecordingSession : IAsyncDisposable
 
         var capture = new WasapiLoopbackCapture(mmDevice);
         var rate = capture.WaveFormat.SampleRate;
-        var stream = new AssemblyAiStream(_apiKey, rate, "speaker");
+        var stream = new AssemblyAiStream(MintTokenAsync, rate, "speaker");
         stream.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
         stream.Error += m => Log?.Invoke(m);
         await stream.StartAsync().ConfigureAwait(false);
@@ -284,11 +288,28 @@ public sealed class RecordingSession : IAsyncDisposable
 
         // Turns arrive on network threads, so hold the lock across the write:
         // a rollover may be swapping the writer underneath us.
+        string meetingId;
         lock (_writerLock)
         {
             _writer?.WriteLine(json);
             _writer?.Flush();
+            meetingId = _meetingId;
         }
+
+        // Local file write above is the durable copy; the cloud write is
+        // best-effort so a network hiccup never interrupts a live recording.
+        if (meetingId.Length > 0)
+        {
+            _ = FireAndForgetAsync(
+                _backend.AppendLineAsync(meetingId, speaker, label, text, startMs, endMs),
+                "cloud sync of a transcript line");
+        }
+    }
+
+    private async Task FireAndForgetAsync(Task task, string what)
+    {
+        try { await task.ConfigureAwait(false); }
+        catch (Exception ex) { Log?.Invoke($"Skipped {what}: {ex.Message}"); }
     }
 
     private void StartNewSessionFile(string? title, bool announce)
@@ -317,6 +338,11 @@ public sealed class RecordingSession : IAsyncDisposable
         writer.WriteLine(JsonSerializer.Serialize(metadata));
         writer.Flush();
 
+        // The local folder name is already a stable, unique, filesystem-safe
+        // id ("recording_yyyyMMdd_HHmmss[_n]") - reused as-is as the backend
+        // meeting id rather than minting a separate one.
+        var meetingId = Path.GetFileName(folder);
+
         StreamWriter? previous;
         string previousFolder;
         lock (_writerLock)
@@ -325,8 +351,13 @@ public sealed class RecordingSession : IAsyncDisposable
             previousFolder = _folder;
             _writer = writer;
             _folder = folder;
+            _meetingId = meetingId;
         }
         previous?.Dispose();
+
+        _ = FireAndForgetAsync(
+            _backend.CreateOrUpdateMeetingAsync(meetingId, title ?? "Untitled meeting", DateTime.Now, "assemblyai", ""),
+            "cloud meeting creation");
 
         // A rollover doesn't mean anyone left - they're still on the same
         // call - so close each present attendee's segment in the old folder
@@ -424,10 +455,14 @@ public sealed class RecordingSession : IAsyncDisposable
         }
     }
 
-    private static void TryAppendAttendeeEvent(string folder, string name, bool joined, DateTime at)
+    private void TryAppendAttendeeEvent(string folder, string name, bool joined, DateTime at)
     {
         try { MeetingStore.AppendAttendeeEvent(folder, name, joined, at); }
         catch (Exception) { /* best-effort; a missed event isn't worth disrupting the recording */ }
+
+        var meetingId = Path.GetFileName(folder);
+        if (meetingId.Length > 0)
+            _ = FireAndForgetAsync(_backend.AppendAttendeeEventAsync(meetingId, name, joined, at), "cloud sync of an attendee event");
     }
 
     /// <summary>

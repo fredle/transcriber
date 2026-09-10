@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -11,8 +13,41 @@ namespace MeetingTranscriber.Services;
 /// </summary>
 public sealed class Settings
 {
-    [JsonPropertyName("apiKey")] public string ApiKey { get; set; } = "";
     [JsonPropertyName("recordingsRoot")] public string RecordingsRoot { get; set; } = "";
+    /// <summary>Signed-in account's email, cached for display only - never used for authorization.</summary>
+    [JsonPropertyName("accountEmail")] public string AccountEmail { get; set; } = "";
+    /// <summary>
+    /// On-disk form of the refresh token: DPAPI-encrypted (current-user
+    /// scope) then base64'd, so settings.json never holds it in the clear.
+    /// Use <see cref="RefreshToken"/> to read/write the plaintext value.
+    /// </summary>
+    [JsonPropertyName("refreshTokenProtected")] public string RefreshTokenProtected { get; set; } = "";
+
+    /// <summary>Plaintext Google/Firebase refresh token. Not the ID token itself - that's minted from this on demand.</summary>
+    [JsonIgnore]
+    public string RefreshToken
+    {
+        get
+        {
+            if (RefreshTokenProtected.Length == 0) return "";
+            try
+            {
+                var cipher = Convert.FromBase64String(RefreshTokenProtected);
+                var plain = ProtectedData.Unprotect(cipher, optionalEntropy: null, DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(plain);
+            }
+            catch (Exception ex) when (ex is FormatException or CryptographicException)
+            {
+                return "";   // stored under a different user/machine - treat as signed out
+            }
+        }
+        set
+        {
+            if (string.IsNullOrEmpty(value)) { RefreshTokenProtected = ""; return; }
+            var cipher = ProtectedData.Protect(Encoding.UTF8.GetBytes(value), optionalEntropy: null, DataProtectionScope.CurrentUser);
+            RefreshTokenProtected = Convert.ToBase64String(cipher);
+        }
+    }
     [JsonPropertyName("micDeviceId")] public string MicDeviceId { get; set; } = "";
     [JsonPropertyName("speakerDeviceId")] public string SpeakerDeviceId { get; set; } = "";
     /// <summary>Keep running in the notification area when the window is closed.</summary>
@@ -57,41 +92,10 @@ public sealed class Settings
             settings = new Settings();
         }
 
-        if (string.IsNullOrWhiteSpace(settings.ApiKey))
-            settings.ApiKey = DiscoverApiKey();
-
         if (!string.IsNullOrWhiteSpace(settings.RecordingsRoot))
             MeetingStore.Root = settings.RecordingsRoot;
 
         return settings;
-    }
-
-    /// <summary>
-    /// Fall back to the environment, then to a .env beside the executable or
-    /// in the working directory - which is how the original tool stored it,
-    /// so an existing setup keeps working without re-entering the key.
-    /// </summary>
-    private static string DiscoverApiKey()
-    {
-        var fromEnv = Environment.GetEnvironmentVariable("ASSEMBLY_AI_TOKEN");
-        if (!string.IsNullOrWhiteSpace(fromEnv)) return fromEnv.Trim();
-
-        foreach (var dir in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
-        {
-            try
-            {
-                var envFile = Path.Combine(dir, ".env");
-                if (!File.Exists(envFile)) continue;
-                foreach (var raw in File.ReadAllLines(envFile))
-                {
-                    var line = raw.Trim();
-                    if (!line.StartsWith("ASSEMBLY_AI_TOKEN=", StringComparison.OrdinalIgnoreCase)) continue;
-                    return line["ASSEMBLY_AI_TOKEN=".Length..].Trim().Trim('"');
-                }
-            }
-            catch (IOException) { }
-        }
-        return "";
     }
 
     public void Save()

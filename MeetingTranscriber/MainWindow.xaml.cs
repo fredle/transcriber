@@ -28,6 +28,8 @@ public partial class MainWindow : Window
     private Brush DimBrush => Themed("Dim");
 
     private readonly Settings _settings = Settings.Load();
+    private readonly AuthService _auth;
+    private readonly BackendClient _backend;
     private readonly DispatcherTimer _uiTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly DispatcherTimer _notesSaveTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly DispatcherTimer _meetingNotesSaveTimer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -84,14 +86,17 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
+        _auth = new AuthService(_settings);
+        _backend = new BackendClient(_auth);
+
         _liveScreenshots = new ScreenshotStrip(LiveScreenshotsPanel, LiveScreenshotImage,
             LiveScreenshotCounter, LiveScreenshotPrevButton, LiveScreenshotNextButton, Log);
         _viewerScreenshots = new ScreenshotStrip(ScreenshotsPanel, ScreenshotImage,
             ScreenshotCounter, ScreenshotPrevButton, ScreenshotNextButton, Log);
 
-        ApiKeyBox.Password = _settings.ApiKey;
         AutoStartOnCallCheck.IsChecked = _settings.AutoStartOnCall;
         AutoStopOnCallEndCheck.IsChecked = _settings.AutoStopOnCallEnd;
+        UpdateAccountStatus();
 
         // Enumerating audio endpoints and scanning the transcript folders are
         // the slow part of startup. Doing them here would hold the window off
@@ -116,8 +121,8 @@ public partial class MainWindow : Window
         };
 
         Log($"Transcriptions folder: {MeetingStore.Root}");
-        if (string.IsNullOrWhiteSpace(_settings.ApiKey))
-            Log("No AssemblyAI key set - enter one above and press Save key.");
+        if (!_auth.IsSignedIn)
+            Log("Not signed in to Teeline Cloud - sign in from Settings before recording.");
     }
 
     /// <summary>
@@ -419,11 +424,43 @@ public partial class MainWindow : Window
             SpeakerCombo.SelectedItem = speaker;
     }
 
-    private void OnSaveKey(object sender, RoutedEventArgs e)
+    private async void OnSignIn(object sender, RoutedEventArgs e)
     {
-        _settings.ApiKey = ApiKeyBox.Password.Trim();
-        _settings.Save();
-        Log(_settings.ApiKey.Length > 0 ? "API key saved." : "API key cleared.");
+        SignInButton.IsEnabled = false;
+        try
+        {
+            await _auth.SignInInteractiveAsync();
+            Log($"Signed in as {_auth.Email}.");
+            // The user just finished the flow in their browser; bring Teeline
+            // back to the front rather than leaving them looking at the browser.
+            RestoreFromTray();
+        }
+        catch (Exception ex)
+        {
+            Log($"Sign-in failed: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "Sign-in failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            SignInButton.IsEnabled = true;
+            UpdateAccountStatus();
+        }
+    }
+
+    private void OnSignOut(object sender, RoutedEventArgs e)
+    {
+        _auth.SignOut();
+        Log("Signed out.");
+        UpdateAccountStatus();
+    }
+
+    private void UpdateAccountStatus()
+    {
+        AccountStatusText.Text = _auth.IsSignedIn
+            ? $"Signed in{(_auth.Email != null ? $" as {_auth.Email}" : "")}."
+            : "Not signed in.";
+        SignInButton.Visibility = _auth.IsSignedIn ? Visibility.Collapsed : Visibility.Visible;
+        SignedInPanel.Visibility = _auth.IsSignedIn ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OnAutoStartOnCallChanged(object sender, RoutedEventArgs e)
@@ -478,10 +515,9 @@ public partial class MainWindow : Window
 
     private async System.Threading.Tasks.Task StartRecordingAsync()
     {
-        var key = ApiKeyBox.Password.Trim();
-        if (key.Length == 0)
+        if (!_auth.IsSignedIn)
         {
-            MessageBox.Show(this, "Enter your AssemblyAI API key first.", "No API key",
+            MessageBox.Show(this, "Sign in to Teeline Cloud first (Settings tab).", "Not signed in",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
@@ -492,14 +528,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        _settings.ApiKey = key;
         _settings.MicDeviceId = mic.Id;
         _settings.SpeakerDeviceId = speaker.Id;
         _settings.Save();
 
         LiveTranscript.Document.Blocks.Clear();
 
-        var session = new RecordingSession(key, mic, speaker);
+        var session = new RecordingSession(_backend, mic, speaker);
         session.TranscriptLine += (spk, _, text) => Dispatcher.Invoke(() => AppendTranscript(spk, text));
         session.Log += m => Dispatcher.Invoke(() => Log(m));
         session.NewSession += (folder, title) => Dispatcher.Invoke(() =>
@@ -604,6 +639,23 @@ public partial class MainWindow : Window
         _liveScreenshots.Load(_notesFolder);
         if (_openMeeting != null && SamePath(_openMeeting.Path, _notesFolder))
             _viewerScreenshots.Load(_openMeeting.Path);
+
+        if (_auth.IsSignedIn) _ = UploadScreenshotAsync(_notesFolder, png);
+    }
+
+    /// <summary>Best-effort cloud copy of a screenshot already saved locally - a failed upload must never surface as a recording error.</summary>
+    private async System.Threading.Tasks.Task UploadScreenshotAsync(string folder, byte[] png)
+    {
+        try
+        {
+            var meetingId = System.IO.Path.GetFileName(folder);
+            var (_, uploadUrl) = await _backend.RequestScreenshotUploadUrlAsync(meetingId);
+            await _backend.UploadScreenshotAsync(uploadUrl, png);
+        }
+        catch (Exception ex)
+        {
+            Log($"Skipped cloud sync of a screenshot: {ex.Message}");
+        }
     }
 
     private void SetRecordingUi(bool recording)
@@ -1613,8 +1665,7 @@ public partial class MainWindow : Window
         // A plain, non-owned Show(): asking questions can take a while per
         // answer, and the user should be free to keep browsing other
         // meetings while one is in flight rather than being blocked by it.
-        var transcriptText = string.Join(Environment.NewLine, _openLines.Select(l => l.Display));
-        var dialog = new AskMeetingDialog(this, _openMeeting.Title, transcriptText);
+        var dialog = new AskMeetingDialog(this, _backend, _openMeeting.Folder, _openMeeting.Title);
         dialog.Show();
     }
 

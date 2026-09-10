@@ -15,6 +15,12 @@ namespace MeetingTranscriber.Services;
 /// diarization) map cleanly onto documented query-string options and this
 /// keeps the session lifecycle — in particular the mandatory Terminate — in
 /// plain sight.
+///
+/// The account's AssemblyAI key never lives in this process: the caller
+/// supplies a delegate that fetches a short-lived, single-use token from the
+/// Teeline backend (see BackendClient.MintAssemblyAiTokenAsync), and the
+/// socket connects with that token in the query string rather than the raw
+/// key in an Authorization header.
 /// </summary>
 public sealed class AssemblyAiStream : IAsyncDisposable
 {
@@ -22,7 +28,7 @@ public sealed class AssemblyAiStream : IAsyncDisposable
     // real time. Capture buffers are far smaller, so they are batched up.
     private const int SendChunkMs = 200;
 
-    private readonly string _apiKey;
+    private readonly Func<CancellationToken, Task<string>> _getToken;
     private readonly int _sampleRate;
     private readonly string _label;
     private readonly int _bytesPerSend;
@@ -40,9 +46,9 @@ public sealed class AssemblyAiStream : IAsyncDisposable
     /// <summary>Fires on transport or API errors, for surfacing in the log.</summary>
     public event Action<string>? Error;
 
-    public AssemblyAiStream(string apiKey, int sampleRate, string label)
+    public AssemblyAiStream(Func<CancellationToken, Task<string>> getToken, int sampleRate, string label)
     {
-        _apiKey = apiKey;
+        _getToken = getToken;
         _sampleRate = sampleRate;
         _label = label;
         // 16-bit mono
@@ -51,16 +57,16 @@ public sealed class AssemblyAiStream : IAsyncDisposable
 
     public async Task StartAsync(CancellationToken cancel = default)
     {
+        var token = await _getToken(cancel).ConfigureAwait(false);
         var uri = new Uri(
             "wss://streaming.assemblyai.com/v3/ws" +
             $"?sample_rate={_sampleRate}" +
             "&encoding=pcm_s16le" +
             "&speech_model=universal-3-5-pro" +
             "&mode=balanced" +
-            "&speaker_labels=true");
+            "&speaker_labels=true" +
+            $"&token={Uri.EscapeDataString(token)}");
 
-        // The Authorization header is the raw key - no "Bearer" prefix.
-        _socket.Options.SetRequestHeader("Authorization", _apiKey);
         await _socket.ConnectAsync(uri, cancel).ConfigureAwait(false);
         _receiveLoop = Task.Run(() => ReceiveLoopAsync(_cts.Token));
     }

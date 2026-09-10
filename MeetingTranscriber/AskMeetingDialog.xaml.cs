@@ -1,8 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Linq;
-using System.Text;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -34,21 +32,21 @@ public partial class AskMeetingDialog : Window
         private void OnPropertyChanged(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 
-    private readonly string _meetingTitle;
-    private readonly string _transcript;
+    private readonly BackendClient _backend;
+    private readonly string _meetingId;
     private readonly ObservableCollection<Turn> _turns = new();
 
     private static Brush Themed(string key) => (Brush)Application.Current.FindResource(key);
 
-    public AskMeetingDialog(Window owner, string meetingTitle, string transcript)
+    public AskMeetingDialog(Window owner, BackendClient backend, string meetingId, string meetingTitle)
     {
         InitializeComponent();
         Owner = owner;
-        _meetingTitle = meetingTitle;
-        _transcript = transcript;
+        _backend = backend;
+        _meetingId = meetingId;
 
         Title = $"Ask about: {meetingTitle}";
-        HeaderText.Text = $"Answers come from the Claude CLI, using \"{meetingTitle}\" as context. " +
+        HeaderText.Text = $"Answers come from Claude, using \"{meetingTitle}\"'s synced transcript as context. " +
                            "Nothing here is saved with the meeting.";
         HistoryList.ItemsSource = _turns;
         _turns.CollectionChanged += (_, _) => EmptyHint.Visibility = _turns.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -76,8 +74,7 @@ public partial class AskMeetingDialog : Window
 
         try
         {
-            var context = BuildContext(turn);
-            var answer = await ClaudeCli.AskAsync(context, question);
+            var answer = await _backend.AskAsync(_meetingId, question);
             turn.Answer = answer.Length == 0 ? "(no answer)" : answer;
             turn.AnswerColor = Themed("Fg");
         }
@@ -95,26 +92,4 @@ public partial class AskMeetingDialog : Window
         }
     }
 
-    /// <summary>Transcript plus every earlier answered turn, so follow-up questions stay coherent.</summary>
-    private string BuildContext(Turn current)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine($"Meeting: {_meetingTitle}");
-        sb.AppendLine();
-        sb.AppendLine("Transcript:");
-        sb.AppendLine(_transcript);
-
-        var priorTurns = _turns.Where(t => t != current && t.Answer != "Thinking...").ToList();
-        if (priorTurns.Count > 0)
-        {
-            sb.AppendLine();
-            sb.AppendLine("Earlier questions in this conversation:");
-            foreach (var t in priorTurns)
-            {
-                sb.AppendLine($"Q: {t.Question}");
-                sb.AppendLine($"A: {t.Answer}");
-            }
-        }
-        return sb.ToString();
-    }
 }
