@@ -30,10 +30,13 @@ public partial class MainWindow : Window
     private readonly Settings _settings = Settings.Load();
     private readonly AuthService _auth;
     private readonly BackendClient _backend;
+    private readonly SyncService _sync;
     private readonly UpdateService _updates = new();
     private readonly DispatcherTimer _uiTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly DispatcherTimer _notesSaveTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly DispatcherTimer _meetingNotesSaveTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _cloudSyncTimer = new() { Interval = TimeSpan.FromSeconds(60) };
+    private bool _syncing;
 
     private RecordingSession? _session;
     private TrayIcon? _tray;
@@ -89,6 +92,7 @@ public partial class MainWindow : Window
 
         _auth = new AuthService(_settings);
         _backend = new BackendClient(_auth);
+        _sync = new SyncService(_backend, Log);
 
         _liveScreenshots = new ScreenshotStrip(LiveScreenshotsPanel, LiveScreenshotImage,
             LiveScreenshotCounter, LiveScreenshotPrevButton, LiveScreenshotNextButton, Log);
@@ -110,6 +114,9 @@ public partial class MainWindow : Window
 
         _uiTimer.Tick += OnUiTick;
         _uiTimer.Start();
+
+        _cloudSyncTimer.Tick += (_, _) => _ = SyncFromCloudAsync();
+        _cloudSyncTimer.Start();
 
         _notesSaveTimer.Tick += (_, _) =>
         {
@@ -150,6 +157,7 @@ public partial class MainWindow : Window
                 LoadDevices();
                 RefreshFolders();
                 RefreshMeetings();
+                _ = SyncFromCloudAsync();
             }
             catch (Exception ex)
             {
@@ -557,6 +565,7 @@ public partial class MainWindow : Window
             // The user just finished the flow in their browser; bring Teeline
             // back to the front rather than leaving them looking at the browser.
             RestoreFromTray();
+            _ = SyncFromCloudAsync();
         }
         catch (Exception ex)
         {
@@ -1045,16 +1054,27 @@ public partial class MainWindow : Window
             if (string.IsNullOrWhiteSpace(range.Text))
             {
                 MeetingStore.DeleteNotes(_notesFolder);
+                PushNotesEdit(_notesFolder, null);
                 return;
             }
             using var stream = new MemoryStream();
             range.Save(stream, DataFormats.Rtf);
-            MeetingStore.SaveNotes(_notesFolder, stream.ToArray());
+            var bytes = stream.ToArray();
+            MeetingStore.SaveNotes(_notesFolder, bytes);
+            PushNotesEdit(_notesFolder, bytes);
         }
         catch (Exception ex)
         {
             Log($"Could not save notes: {ex.Message}");
         }
+    }
+
+    /// <summary>Live recording notes are always on an "assemblyai" session (the only engine RecordingSession uses), so no engine check is needed here unlike PushCloudEdit.</summary>
+    private void PushNotesEdit(string folder, byte[]? rtfBytes)
+    {
+        if (!_auth.IsSignedIn) return;
+        var meetingId = Path.GetFileName(folder);
+        _ = FireAndForgetCloudAsync(_backend.UpdateMeetingNotesAsync(meetingId, rtfBytes), "the notes");
     }
 
     // ── Notes for a meeting selected in Recent Meetings ─────────────────────
@@ -1086,11 +1106,14 @@ public partial class MainWindow : Window
             if (string.IsNullOrWhiteSpace(range.Text))
             {
                 MeetingStore.DeleteNotes(_openMeeting.Path);
+                PushCloudEdit(_openMeeting, () => _backend.UpdateMeetingNotesAsync(_openMeeting.Folder, null), "the notes");
                 return;
             }
             using var stream = new MemoryStream();
             range.Save(stream, DataFormats.Rtf);
-            MeetingStore.SaveNotes(_openMeeting.Path, stream.ToArray());
+            var bytes = stream.ToArray();
+            MeetingStore.SaveNotes(_openMeeting.Path, bytes);
+            PushCloudEdit(_openMeeting, () => _backend.UpdateMeetingNotesAsync(_openMeeting.Folder, bytes), "the notes");
         }
         catch (Exception ex)
         {
@@ -1140,7 +1163,64 @@ public partial class MainWindow : Window
         }
     }
 
-    private void OnRefreshMeetings(object sender, RoutedEventArgs e) => RefreshMeetings();
+    private void OnRefreshMeetings(object sender, RoutedEventArgs e)
+    {
+        RefreshMeetings();
+        _ = SyncFromCloudAsync();
+    }
+
+    /// <summary>
+    /// Pulls down meetings recorded elsewhere on this account, so this
+    /// machine's meeting list catches up with other machines. Best-effort and
+    /// silently overlapped-guarded: a slow pull is just skipped by the next
+    /// timer tick rather than piling up concurrent requests.
+    /// </summary>
+    private async Task SyncFromCloudAsync()
+    {
+        if (!_auth.IsSignedIn || _syncing) return;
+        _syncing = true;
+        try
+        {
+            await _sync.PullAsync().ConfigureAwait(true);
+            RefreshMeetings();
+        }
+        catch (Exception ex)
+        {
+            Log($"Cloud sync failed: {ex.Message}");
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
+
+    /// <summary>
+    /// Pushes a local edit (rename, move, transcript change, notes) up to the
+    /// cloud, best-effort - a network hiccup never blocks the local edit,
+    /// which has already been saved by the time this runs. Only meetings that
+    /// were ever uploaded live (the "assemblyai" engine, whether recorded
+    /// here or pulled down from another machine) have a cloud copy to push
+    /// to; an older whisper-engine recording has none, and creating one here
+    /// would leave a sparse cloud doc missing the fields a normal upload sets.
+    /// </summary>
+    private void PushCloudEdit(Meeting meeting, Func<Task> action, string what)
+    {
+        if (!_auth.IsSignedIn || meeting.Engine != "assemblyai") return;
+        _ = FireAndForgetCloudAsync(action(), what);
+    }
+
+    private void PushTranscriptEdit(Meeting? meeting)
+    {
+        if (meeting == null || !_auth.IsSignedIn || meeting.Engine != "assemblyai") return;
+        var lines = MeetingStore.ReadTranscript(meeting.Path);
+        _ = FireAndForgetCloudAsync(_backend.ReplaceLinesAsync(meeting.Folder, lines), "the transcript edit");
+    }
+
+    private async Task FireAndForgetCloudAsync(Task task, string what)
+    {
+        try { await task.ConfigureAwait(true); }
+        catch (Exception ex) { Log($"Cloud sync of {what} skipped: {ex.Message}"); }
+    }
 
     // ── Folders ───────────────────────────────────────────────────────────
 
@@ -1241,6 +1321,7 @@ public partial class MainWindow : Window
         {
             MeetingStore.MoveMeeting(meeting.Path, target);
             Log($"Moved {meeting.Folder} to {(target.Length == 0 ? "Unfiled" : target)}.");
+            PushCloudEdit(meeting, () => _backend.UpdateMeetingGroupAsync(meeting.Folder, target), "the move");
         }
         catch (Exception ex)
         {
@@ -1428,6 +1509,7 @@ public partial class MainWindow : Window
         {
             MeetingStore.RenameMeeting(_openMeeting.Path, name);
             Log($"Renamed {_openMeeting.Folder} to \"{name.Trim()}\".");
+            PushCloudEdit(_openMeeting, () => _backend.UpdateMeetingTitleAsync(_openMeeting.Folder, name.Trim()), "the rename");
         }
         catch (Exception ex)
         {
@@ -1723,6 +1805,7 @@ public partial class MainWindow : Window
 
         // Re-read from disk so indices match the edited file.
         ReloadOpenTranscript();
+        PushTranscriptEdit(_openMeeting);
         DeleteLinesButton.Visibility = Visibility.Collapsed;
         RefreshMeetings();
     }
@@ -1859,6 +1942,7 @@ public partial class MainWindow : Window
         }
 
         ReloadOpenTranscript();
+        PushTranscriptEdit(_openMeeting);
         ChangeSpeakerButton.Visibility = Visibility.Collapsed;
     }
 
@@ -1872,6 +1956,7 @@ public partial class MainWindow : Window
     protected override async void OnClosed(EventArgs e)
     {
         _uiTimer.Stop();
+        _cloudSyncTimer.Stop();
         _tray?.Dispose();
         _tray = null;
         FlushNotes();

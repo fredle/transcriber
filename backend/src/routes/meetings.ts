@@ -29,10 +29,12 @@ router.post("/", async (req, res) => {
 
 router.patch("/:id", async (req, res) => {
   const uid = uidOf(req);
-  const { title, group } = req.body ?? {};
+  const { title, group, notes } = req.body ?? {};
   const patch: Record<string, unknown> = { updatedAt: FieldValue.serverTimestamp() };
   if (typeof title === "string") patch.title = title;
   if (typeof group === "string") patch.group = group;
+  // notes is the RTF bytes, base64-encoded; null clears them (user cleared the notes box).
+  if (typeof notes === "string" || notes === null) patch.notes = notes;
 
   await meetingDoc(uid, req.params.id).set(patch, { merge: true });
   res.status(204).end();
@@ -42,7 +44,13 @@ router.get("/", async (req, res) => {
   const uid = uidOf(req);
   const limit = Math.min(500, Number(req.query.limit) || 100);
   const snap = await meetingsCollection(uid).orderBy("started", "desc").limit(limit).get();
-  res.json(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  // notes can be large-ish and isn't needed for the list view - only for GET /:id.
+  res.json(
+    snap.docs.map((d) => {
+      const { notes: _notes, ...rest } = d.data();
+      return { id: d.id, ...rest };
+    }),
+  );
 });
 
 router.get("/:id", async (req, res) => {

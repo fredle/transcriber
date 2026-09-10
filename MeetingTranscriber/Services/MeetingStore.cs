@@ -119,14 +119,17 @@ public static class MeetingStore
     }
 
     /// <summary>
-    /// Documents\Teeline, migrating an older Documents\Kettle or, before
-    /// that, Documents\MeetingTranscriber folder from prior renames so
-    /// existing recordings are never orphaned.
+    /// %AppData%\Teeline\Recordings, migrating an older Documents\Kettle or,
+    /// before that, Documents\MeetingTranscriber folder from prior renames so
+    /// a never-migrated ancient install isn't orphaned. Does not migrate an
+    /// existing Documents\Teeline folder - those recordings stay where they
+    /// are unless the user points RecordingsRoot at them.
     /// </summary>
     private static string ResolveDefaultRoot()
     {
         var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-        var current = Path.Combine(documents, "Teeline");
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var current = Path.Combine(appData, "Teeline", "Recordings");
         LegacyMigration.MigrateFolder(Path.Combine(documents, "Kettle"), current);
         LegacyMigration.MigrateFolder(Path.Combine(documents, "MeetingTranscriber"), current);
         return current;
@@ -196,6 +199,28 @@ public static class MeetingStore
                 Group = group,
             });
         }
+    }
+
+    /// <summary>
+    /// Full path of a recording folder by its leaf name (root or one
+    /// organizational folder deep), or null if no such folder exists locally.
+    /// Used to tell whether a meeting from the cloud already has a local copy.
+    /// </summary>
+    public static string? FindMeetingFolder(string folderName)
+    {
+        if (!Directory.Exists(Root)) return null;
+
+        var direct = Path.Combine(Root, folderName);
+        if (Directory.Exists(direct)) return direct;
+
+        foreach (var dir in Directory.EnumerateDirectories(Root))
+        {
+            var name = Path.GetFileName(dir);
+            if (name.StartsWith("recording_", StringComparison.Ordinal)) continue;
+            var candidate = Path.Combine(dir, folderName);
+            if (Directory.Exists(candidate)) return candidate;
+        }
+        return null;
     }
 
     /// <summary>Organizational folders under Root, used to group meetings. Does not include recording folders themselves.</summary>
