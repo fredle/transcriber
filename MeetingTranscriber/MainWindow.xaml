@@ -526,6 +526,15 @@
                                   Margin="0,8,0,0" Checked="OnAutoStopOnCallEndChanged" Unchecked="OnAutoStopOnCallEndChanged"/>
                     </StackPanel>
                 </Border>
+                <Border Style="{StaticResource Card}" Padding="14,12" Margin="0,10,0,0">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock x:Name="VersionText" VerticalAlignment="Center"
+                                   Foreground="{StaticResource Dim}" FontSize="12"/>
+                        <TextBlock x:Name="WhatsNewLink" Text="What's new" Margin="12,0,0,0" VerticalAlignment="Center"
+                                   FontSize="12" Foreground="{StaticResource Dim}" TextDecorations="Underline"
+                                   Cursor="Hand" MouseLeftButtonUp="OnShowWhatsNew"/>
+                    </StackPanel>
+                </Border>
             </StackPanel>
         </TabItem>
     </TabControl>

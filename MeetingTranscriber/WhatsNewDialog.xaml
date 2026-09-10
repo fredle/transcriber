@@ -1,0 +1,28 @@
+<Window x:Class="MeetingTranscriber.WhatsNewDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Height="460" Width="440" MinHeight="300" MinWidth="360"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Background="{StaticResource WindowBg}">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="HeaderText" Grid.Row="0" FontSize="16" FontWeight="SemiBold"
+                   Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+        <Border Grid.Row="1" Background="{StaticResource Panel}" BorderBrush="{StaticResource Border}"
+                BorderThickness="1" CornerRadius="8" Padding="4">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12">
+                <TextBlock x:Name="NotesText" TextWrapping="Wrap" FontSize="13"/>
+            </ScrollViewer>
+        </Border>
+
+        <Button Grid.Row="2" Content="Got it" HorizontalAlignment="Right" Margin="0,14,0,0"
+                Padding="20,7" Click="OnGotIt" IsDefault="True" IsCancel="True"/>
+    </Grid>
+</Window>

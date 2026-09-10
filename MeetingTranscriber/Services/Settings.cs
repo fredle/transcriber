@@ -58,6 +58,8 @@ public sealed class Settings
     /// <summary>Stop transcribing by itself when the Teams call ends. Off by
     /// default, matching AutoStartOnCall's deliberate-act stance.</summary>
     [JsonPropertyName("autoStopOnCallEnd")] public bool AutoStopOnCallEnd { get; set; }
+    /// <summary>Version last seen at startup, so a version bump (e.g. an applied auto-update) can be told apart from every other launch. Empty on a first-ever run, which is deliberately not treated as an update.</summary>
+    [JsonPropertyName("lastSeenVersion")] public string LastSeenVersion { get; set; } = "";
 
     /// <summary>
     /// %AppData%\Teeline, migrating an older %AppData%\Kettle or, before

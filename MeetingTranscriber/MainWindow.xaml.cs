@@ -97,6 +97,7 @@ public partial class MainWindow : Window
 
         AutoStartOnCallCheck.IsChecked = _settings.AutoStartOnCall;
         AutoStopOnCallEndCheck.IsChecked = _settings.AutoStopOnCallEnd;
+        VersionText.Text = $"Teeline v{AppVersion.Current}";
         UpdateAccountStatus();
 
         // Enumerating audio endpoints and scanning the transcript folders are
@@ -159,6 +160,31 @@ public partial class MainWindow : Window
         // Not urgent, and never blocks anything else - queued at idle
         // priority well after the window is up and usable.
         Dispatcher.BeginInvoke(new Action(() => _ = CheckForUpdatesAsync()), DispatcherPriority.ApplicationIdle);
+        Dispatcher.BeginInvoke(new Action(() => _ = CheckForWhatsNewAsync()), DispatcherPriority.ApplicationIdle);
+    }
+
+    /// <summary>
+    /// Shows "What's new" once, the first time this version runs - i.e. right
+    /// after an applied update relaunches the app. LastSeenVersion starting
+    /// empty (a fresh install) is deliberately not treated as an update: seed
+    /// it silently instead of greeting a new user with a changelog.
+    /// </summary>
+    private async System.Threading.Tasks.Task CheckForWhatsNewAsync()
+    {
+        var isUpdate = _settings.LastSeenVersion.Length > 0 && _settings.LastSeenVersion != AppVersion.Current;
+        if (isUpdate)
+        {
+            var notes = await _updates.FetchReleaseNotesAsync(AppVersion.Current);
+            new WhatsNewDialog(this, AppVersion.Current, notes).ShowDialog();
+        }
+        _settings.LastSeenVersion = AppVersion.Current;
+        _settings.Save();
+    }
+
+    private async void OnShowWhatsNew(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        var notes = await _updates.FetchReleaseNotesAsync(AppVersion.Current);
+        new WhatsNewDialog(this, AppVersion.Current, notes).ShowDialog();
     }
 
     // ── Notification area ─────────────────────────────────────────────────
