@@ -77,6 +77,7 @@ jobs:
         run: |
           vpk download http --url "https://teeline-releases.web.app/" --outputDir Releases --channel win
           if ($LASTEXITCODE -ne 0) { Write-Host "No previous release found (first release?) - continuing with a clean Releases dir." }
+          exit 0
 
       - name: Publish self-contained build
         run: >
