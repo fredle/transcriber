@@ -11,7 +11,9 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # write is only needed for the one-time GitHub bridge release below -
+  # drop back to read once that step is removed.
+  contents: write
   id-token: write
 
 jobs:
@@ -141,6 +143,33 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "Releases\notes" | Out-Null
           Copy-Item notes.md "Releases\notes\${{ steps.version.outputs.version }}.md"
+
+      - name: ONE-TIME BRIDGE RELEASE - publish to GitHub too
+        # Every install up to and including v0.4.0 has the old UpdateService
+        # baked in, which only ever checks GitHub Releases. If this version
+        # only went to Firebase Hosting, those installs would silently never
+        # see another update again. Publishing this one version to GitHub
+        # too lets them pick it up one last time and switch over to checking
+        # Firebase from then on. Delete this step (and drop `contents:` back
+        # to `read` above) once this release is out.
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          vpk upload github `
+            --repoUrl https://github.com/fredle/transcriber `
+            --token $env:GITHUB_TOKEN `
+            --tag ${{ steps.version.outputs.tag }} `
+            --releaseName "Teeline ${{ steps.version.outputs.tag }}" `
+            --outputDir Releases `
+            --publish
+          if ($LASTEXITCODE -ne 0) { throw "vpk upload github failed with exit code $LASTEXITCODE" }
+
+      - name: ONE-TIME BRIDGE RELEASE - set release notes on the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release edit "${{ steps.version.outputs.tag }}" --notes-file notes.md
 
       - name: GCP login (Workload Identity Federation)
         uses: google-github-actions/auth@v2
