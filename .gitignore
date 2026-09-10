@@ -55,3 +55,6 @@ dist/
 
 # Node (backend/)
 node_modules/
+
+# Velopack packaging output (vpk pack)
+/Releases/

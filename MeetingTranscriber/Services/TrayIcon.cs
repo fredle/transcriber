@@ -17,6 +17,7 @@ public sealed class TrayIcon : IDisposable
     private readonly ToolStripMenuItem _transcribeItem;
     private readonly ToolStripMenuItem _autoStartItem;
     private readonly ToolStripMenuItem _autoStopItem;
+    private readonly ToolStripMenuItem _updateItem;
     private readonly Icon _idleIcon;
     private readonly Icon _recordingIcon;
     private bool? _shownAsRecording;
@@ -27,6 +28,7 @@ public sealed class TrayIcon : IDisposable
     public event Action? ExitRequested;
     public event Action<bool>? AutoStartChanged;
     public event Action<bool>? AutoStopChanged;
+    public event Action? UpdateRequested;
 
     public TrayIcon(bool autoStart, bool autoStop)
     {
@@ -47,6 +49,12 @@ public sealed class TrayIcon : IDisposable
         };
         _autoStopItem.CheckedChanged += (_, _) => AutoStopChanged?.Invoke(_autoStopItem.Checked);
 
+        // Hidden until an update has actually finished downloading - see
+        // MainWindow's update check - so the menu doesn't offer a restart
+        // that has nothing to apply yet.
+        _updateItem = new ToolStripMenuItem("Restart to update",
+            null, (_, _) => UpdateRequested?.Invoke()) { Visible = false };
+
         var menu = new ContextMenuStrip();
         menu.Items.Add(_showItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -56,6 +64,7 @@ public sealed class TrayIcon : IDisposable
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open transcripts folder",
             null, (_, _) => OpenFolderRequested?.Invoke()));
+        menu.Items.Add(_updateItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => ExitRequested?.Invoke()));
 
@@ -161,6 +170,12 @@ public sealed class TrayIcon : IDisposable
     public void SetAutoStop(bool value)
     {
         if (_autoStopItem.Checked != value) _autoStopItem.Checked = value;
+    }
+
+    public void ShowUpdateAvailable(string version)
+    {
+        _updateItem.Text = $"Restart to update (v{version})";
+        _updateItem.Visible = true;
     }
 
     public void Dispose()

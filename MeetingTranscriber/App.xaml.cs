@@ -5,11 +5,31 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
 using MeetingTranscriber.Services;
+using Velopack;
 
 namespace MeetingTranscriber;
 
 public partial class App : Application
 {
+    /// <summary>
+    /// Velopack's own entry point, which must run before anything else in the
+    /// process - including WPF's own startup. During install/uninstall it is
+    /// briefly launched with special arguments (e.g. to create/remove
+    /// shortcuts) and Run() handles those cases and exits immediately without
+    /// ever reaching the rest of this method; a normal launch returns
+    /// straight through. Replaces the WPF SDK's auto-generated Main (it only
+    /// generates one if the App partial class doesn't already define one).
+    /// </summary>
+    [STAThread]
+    private static void Main(string[] args)
+    {
+        VelopackApp.Build().Run();
+
+        var app = new App();
+        app.InitializeComponent();
+        app.Run();
+    }
+
     private static readonly string CrashLog = Path.Combine(ResolveAppDataDir(), "crash.log");
 
     /// <summary>

@@ -36,6 +36,21 @@
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="Velopack" Version="1.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- App.xaml.cs defines its own Main (required by Velopack, which must
+         run before anything else in the process). The WPF SDK normally
+         auto-generates its own Main into App.g.cs whenever App.xaml has
+         Build Action "ApplicationDefinition" - unconditionally, regardless
+         of StartupObject - so App.xaml is switched to a plain Page here to
+         suppress that and let ours be the only one. -->
+    <ApplicationDefinition Remove="App.xaml" />
+    <Page Include="App.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
   </ItemGroup>
 
   <ItemGroup>

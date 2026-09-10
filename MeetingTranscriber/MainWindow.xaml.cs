@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     private readonly Settings _settings = Settings.Load();
     private readonly AuthService _auth;
     private readonly BackendClient _backend;
+    private readonly UpdateService _updates = new();
     private readonly DispatcherTimer _uiTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private readonly DispatcherTimer _notesSaveTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly DispatcherTimer _meetingNotesSaveTimer = new() { Interval = TimeSpan.FromSeconds(1) };
@@ -154,6 +155,10 @@ public partial class MainWindow : Window
                 Log($"Startup problem: {ex.Message}");
             }
         }), DispatcherPriority.Background);
+
+        // Not urgent, and never blocks anything else - queued at idle
+        // priority well after the window is up and usable.
+        Dispatcher.BeginInvoke(new Action(() => _ = CheckForUpdatesAsync()), DispatcherPriority.ApplicationIdle);
     }
 
     // ── Notification area ─────────────────────────────────────────────────
@@ -203,6 +208,41 @@ public partial class MainWindow : Window
             _exiting = true;
             Close();
         };
+        _tray.UpdateRequested += OnUpdateRequested;
+    }
+
+    /// <summary>
+    /// Checks GitHub for a newer build and downloads it silently. Never
+    /// applies it here - only flags it as ready (tray item + toast) - since
+    /// applying restarts the process and a meeting could be recording.
+    /// Best-effort: a dev build (not installed via the Velopack installer)
+    /// or a network hiccup just means nothing happens, silently.
+    /// </summary>
+    private async System.Threading.Tasks.Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            if (!await _updates.CheckAndDownloadAsync()) return;
+            Log($"Update v{_updates.PendingVersion} downloaded - restart Teeline to apply it.");
+            _tray?.ShowUpdateAvailable(_updates.PendingVersion!);
+            _tray?.Notify("Update ready", $"Teeline v{_updates.PendingVersion} downloaded. Click to restart and update.", OnUpdateRequested);
+        }
+        catch (Exception ex)
+        {
+            Log($"Update check failed: {ex.Message}");
+        }
+    }
+
+    private void OnUpdateRequested()
+    {
+        if (_session != null)
+        {
+            MessageBox.Show(this, "Stop transcribing before restarting to update.", "Recording in progress",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        _exiting = true;
+        _updates.ApplyAndRestart();
     }
 
     /// <summary>

@@ -79,40 +79,51 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
-      - name: Zip the portable (no-installer) build
+      - name: Install Velopack CLI
+        run: dotnet tool install --global vpk
+
+      - name: Pack release (Velopack)
+        # Produces, in Releases/: the update feed (RELEASES, releases.win.json,
+        # Teeline-<ver>-full.nupkg - containing the already-signed Teeline.exe),
+        # Teeline-win-Setup.exe (installer/bootstrapper - signed next, since it
+        # doesn't exist until this step), and Teeline-win-Portable.zip (a
+        # portable copy, no installer, no auto-update).
         shell: pwsh
         run: |
-          Compress-Archive `
-            -Path "MeetingTranscriber\bin\Release\net8.0-windows\win-x64\publish\*" `
-            -DestinationPath "Teeline-${{ steps.version.outputs.tag }}-win-x64.zip"
+          vpk pack `
+            --packId Teeline `
+            --packVersion ${{ steps.version.outputs.version }} `
+            --packDir "MeetingTranscriber\bin\Release\net8.0-windows\win-x64\publish" `
+            --mainExe Teeline.exe `
+            --packTitle Teeline `
+            --packAuthors "FBL Consulting Ltd" `
+            --icon MeetingTranscriber\assets\teeline.ico `
+            --outputDir Releases
 
-      - name: Build installer (Inno Setup)
-        shell: pwsh
-        run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            "/DPublishDir=$($PWD)\MeetingTranscriber\bin\Release\net8.0-windows\win-x64\publish" `
-            "/DAppVersion=${{ steps.version.outputs.version }}" `
-            installer\Teeline.iss
-
-      - name: Sign the installer
+      - name: Sign the installer (Azure Trusted Signing)
         uses: Azure/artifact-signing-action@v2.0.0
         with:
           endpoint: https://weu.codesigning.azure.net/
           signing-account-name: leatham-signing-account
           certificate-profile-name: cert-profile
-          files-folder: ${{ github.workspace }}\installer\Output
+          files-folder: ${{ github.workspace }}\Releases
           files-folder-filter: exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
-      - name: Create GitHub release
+      - name: Publish release (Velopack -> GitHub Releases)
+        shell: pwsh
+        run: |
+          vpk upload github `
+            --repoUrl https://github.com/fredle/transcriber `
+            --token ${{ github.token }} `
+            --tag ${{ steps.version.outputs.tag }} `
+            --releaseName "Teeline ${{ steps.version.outputs.tag }}" `
+            --outputDir Releases `
+            --publish
+
+      - name: Generate release notes
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
-            "installer/Output/TeelineSetup.exe#Teeline installer (recommended)" \
-            "Teeline-${{ steps.version.outputs.tag }}-win-x64.zip#Portable build (no installer)" \
-            --title "Teeline ${{ steps.version.outputs.tag }}" \
-            --generate-notes
+        run: gh release edit "${{ steps.version.outputs.tag }}" --generate-notes
