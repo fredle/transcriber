@@ -218,11 +218,68 @@ public partial class MainWindow : Window
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
         Activate();
         var handle = new WindowInteropHelper(this).Handle;
-        if (handle != IntPtr.Zero) SetForegroundWindow(handle);
+        if (handle != IntPtr.Zero) ForceForeground(handle);
     }
+
+    /// <summary>
+    /// Windows' foreground-lock rules ignore a plain SetForegroundWindow call
+    /// from a process that didn't just receive user input - which is exactly
+    /// what happens here: the request to come to front arrives on a
+    /// background HTTP listener thread after the browser (not Teeline) last
+    /// had focus, e.g. right after finishing the Google sign-in flow. Briefly
+    /// attaching our input queue to the current foreground thread is the
+    /// standard way around that restriction; toggling Topmost is a second,
+    /// independent nudge that goes through a different code path
+    /// (SetWindowPos) and has been observed to succeed even on the rare
+    /// occasion AttachThreadInput alone doesn't.
+    /// </summary>
+    private static void ForceForeground(IntPtr handle)
+    {
+        var foreground = GetForegroundWindow();
+        var foregroundThread = GetWindowThreadProcessId(foreground, out _);
+        var thisThread = GetCurrentThreadId();
+
+        var attached = foregroundThread != thisThread && AttachThreadInput(thisThread, foregroundThread, true);
+        try
+        {
+            ShowWindow(handle, SW_RESTORE);
+            BringWindowToTop(handle);
+            SetForegroundWindow(handle);
+        }
+        finally
+        {
+            if (attached) AttachThreadInput(thisThread, foregroundThread, false);
+        }
+
+        if (Application.Current.MainWindow is { } window)
+        {
+            window.Topmost = true;
+            window.Topmost = false;
+        }
+    }
+
+    private const int SW_RESTORE = 9;
 
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    private static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     /// <summary>
     /// Closing the window leaves the app running in the notification area so

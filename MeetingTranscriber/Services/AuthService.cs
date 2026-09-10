@@ -76,14 +76,16 @@ public sealed class AuthService
             var error = query["error"];
             code = query["code"] ?? "";
 
-            // window.open('','_self').close() closes a tab the browser opened
-            // for a plain navigation (not via script), which window.close()
-            // alone can't do in most browsers - the standard workaround. The
-            // visible text is only a fallback for the rare browser that blocks
-            // even that.
-            const string autoClose = "<script>window.open('','_self').close();</script>";
+            // A tab the browser opened for a plain navigation (not via
+            // window.open from script) generally can't be closed by script in
+            // current Chrome/Edge, no matter the trick - this is attempted as
+            // a best effort, but Teeline itself coming to the foreground
+            // (RestoreFromTray, called after this returns) is the reliable
+            // part of "come back to the app," so the message doesn't promise
+            // something the browser may simply refuse to do.
+            const string autoClose = "<script>window.open('','_self','');window.close();</script>";
             var html = error == null
-                ? $"<html><body>{autoClose}Signed in - this window should close automatically.</body></html>"
+                ? $"<html><body>{autoClose}Signed in to Teeline. You can close this tab.</body></html>"
                 : $"<html><body>{autoClose}Sign-in failed: {WebUtility.HtmlEncode(error)}</body></html>";
             var buffer = Encoding.UTF8.GetBytes(html);
             context.Response.ContentType = "text/html";
