@@ -11,13 +11,14 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
 
 jobs:
   release:
     runs-on: windows-latest
     environment: release
+
     steps:
       - name: Determine tag and version
         id: version
@@ -31,6 +32,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.version.outputs.tag }}
+          fetch-depth: 0
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -51,6 +53,28 @@ jobs:
           $content = $content.Replace('__TEELINE_GOOGLE_CLIENT_ID__', $env:GOOGLE_CLIENT_ID)
           $content = $content.Replace('__TEELINE_GOOGLE_CLIENT_SECRET__', $env:GOOGLE_CLIENT_SECRET)
           Set-Content -Path $path -Value $content -NoNewline
+
+      - name: Generate release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f "tag_name=${{ steps.version.outputs.tag }}" \
+            --jq .body > notes.md
+          cat notes.md
+
+      - name: Install Velopack CLI
+        run: dotnet tool install --global vpk
+
+      - name: Download previous releases
+        # So `vpk pack` can compute deltas against the last published version.
+        # Nothing to download yet on the very first release.
+        shell: pwsh
+        run: |
+          vpk download http --url "https://teeline-releases.web.app/" --outputDir Releases --channel win
+          if ($LASTEXITCODE -ne 0) { Write-Host "No previous release found (first release?) - continuing with a clean Releases dir." }
 
       - name: Publish self-contained build
         run: >
@@ -79,15 +103,14 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
-      - name: Install Velopack CLI
-        run: dotnet tool install --global vpk
-
       - name: Pack release (Velopack)
-        # Produces, in Releases/: the update feed (RELEASES, releases.win.json,
-        # Teeline-<ver>-full.nupkg - containing the already-signed Teeline.exe),
-        # Teeline-win-Setup.exe (installer/bootstrapper - signed next, since it
-        # doesn't exist until this step), and Teeline-win-Portable.zip (a
-        # portable copy, no installer, no auto-update).
+        # Produces, in Releases/: the update feed (releases.win.json - merged
+        # with whatever was downloaded above, containing delta packages back
+        # to the previous version), Teeline-<ver>-full.nupkg (containing the
+        # already-signed Teeline.exe), Teeline-win-Setup.exe (installer/
+        # bootstrapper - signed next, since it doesn't exist until this step),
+        # and Teeline-win-Portable.zip (a portable copy, no installer, no
+        # auto-update).
         shell: pwsh
         run: |
           vpk pack `
@@ -98,6 +121,7 @@ jobs:
             --packTitle Teeline `
             --packAuthors "FBL Consulting Ltd" `
             --icon MeetingTranscriber\assets\teeline.ico `
+            --releaseNotes notes.md `
             --outputDir Releases
 
       - name: Sign the installer (Azure Trusted Signing)
@@ -112,26 +136,21 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
-      - name: Publish release (Velopack -> GitHub Releases)
+      - name: Add versioned release notes for the What's New popup
         shell: pwsh
         run: |
-          vpk upload github `
-            --repoUrl https://github.com/fredle/transcriber `
-            --token ${{ github.token }} `
-            --tag ${{ steps.version.outputs.tag }} `
-            --releaseName "Teeline ${{ steps.version.outputs.tag }}" `
-            --outputDir Releases `
-            --publish
+          New-Item -ItemType Directory -Force -Path "Releases\notes" | Out-Null
+          Copy-Item notes.md "Releases\notes\${{ steps.version.outputs.version }}.md"
 
-      - name: Generate release notes
-        # "gh release edit" has no --generate-notes flag (that's create-only),
-        # so the notes are generated via the API and applied to the release
-        # vpk upload already created.
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: GCP login (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Deploy release feed to Firebase Hosting
         shell: bash
         run: |
-          gh api "repos/${{ github.repository }}/releases/generate-notes" \
-            -f "tag_name=${{ steps.version.outputs.tag }}" \
-            --jq .body > notes.md
-          gh release edit "${{ steps.version.outputs.tag }}" --notes-file notes.md
+          npx firebase-tools@15 deploy --only hosting:${{ vars.FIREBASE_HOSTING_SITE }} \
+            --project ${{ vars.FIREBASE_PROJECT_ID }} \
+            --non-interactive

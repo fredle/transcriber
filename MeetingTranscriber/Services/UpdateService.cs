@@ -1,8 +1,5 @@
 using System;
 using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Velopack;
 using Velopack.Sources;
@@ -10,18 +7,20 @@ using Velopack.Sources;
 namespace MeetingTranscriber.Services;
 
 /// <summary>
-/// Checks GitHub Releases for a newer Teeline build and downloads it in the
-/// background. Deliberately never applies an update on its own: a meeting
-/// could be recording, and applying an update restarts the process, so that
-/// only happens when the caller explicitly asks (see MainWindow's "Restart
-/// to update" tray item), after confirming nothing is in progress.
+/// Checks Teeline's release feed (Firebase Hosting, not GitHub - the source
+/// is closed and the feed needs to be downloadable with no auth) for a newer
+/// build and downloads it in the background. Deliberately never applies an
+/// update on its own: a meeting could be recording, and applying an update
+/// restarts the process, so that only happens when the caller explicitly
+/// asks (see MainWindow's "Restart to update" tray item), after confirming
+/// nothing is in progress.
 /// </summary>
 public sealed class UpdateService
 {
-    private const string RepoApiBase = "https://api.github.com/repos/fredle/transcriber";
+    private const string ReleaseFeedBaseUrl = "https://teeline-releases.web.app/";
 
     private readonly UpdateManager _manager = new(
-        new GithubSource("https://github.com/fredle/transcriber", null, false));
+        new SimpleWebSource(ReleaseFeedBaseUrl));
     private readonly HttpClient _http = new();
 
     private UpdateInfo? _pendingUpdate;
@@ -51,28 +50,18 @@ public sealed class UpdateService
         if (_pendingUpdate != null) _manager.ApplyUpdatesAndRestart(_pendingUpdate.TargetFullRelease);
     }
 
-    /// <summary>The GitHub release body for a specific version (e.g. after an update was just applied), or "" if it can't be fetched.</summary>
+    /// <summary>The release notes for a specific version (e.g. after an update was just applied), or "" if it can't be fetched.</summary>
     public async Task<string> FetchReleaseNotesAsync(string version)
     {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, $"{RepoApiBase}/releases/tags/v{version}");
-            // The GitHub API rejects requests with no User-Agent.
-            request.Headers.UserAgent.Add(new ProductInfoHeaderValue("Teeline", version));
-            using var response = await _http.SendAsync(request).ConfigureAwait(false);
+            using var response = await _http.GetAsync($"{ReleaseFeedBaseUrl}notes/{version}.md").ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return "";
-
-            var release = await response.Content.ReadFromJsonAsync<GithubRelease>().ConfigureAwait(false);
-            return release?.Body ?? "";
+            return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
         }
         catch (Exception)
         {
             return "";   // best-effort - a missing "what's new" popup isn't worth surfacing an error over
         }
-    }
-
-    private sealed class GithubRelease
-    {
-        [JsonPropertyName("body")] public string? Body { get; set; }
     }
 }

@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "default": "leatham-sandbox"
+  },
+  "targets": {
+    "leatham-sandbox": {
+      "hosting": {
+        "teeline-releases": ["teeline-releases"]
+      }
+    }
+  }
+}
