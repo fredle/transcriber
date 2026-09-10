@@ -16,11 +16,19 @@ $Steam = [System.Drawing.Color]::FromArgb(150, 14, 124, 102)
 function Draw-Kettle {
     param([System.Drawing.Graphics]$g, [double]$s, [double]$ox = 0, [double]$oy = 0)
 
+    # The kettle artwork only fills a small part of its 100x100 unit box,
+    # so at small sizes (taskbar/tray) it reads noticeably smaller than
+    # other apps' icons. Scale it up around its own centre before mapping
+    # into pixel space, rather than editing every coordinate above.
+    $zoom = 1.12
+    $cx = 47.75
+    $cy = 40.45
+    function Zoom([double]$v, [double]$c) { $c + $zoom * ($v - $c) }
     function P([double]$x, [double]$y) {
-        New-Object System.Drawing.PointF (($x * $s) + $ox), (($y * $s) + $oy)
+        New-Object System.Drawing.PointF (((Zoom $x $cx) * $s) + $ox), (((Zoom $y $cy) * $s) + $oy)
     }
     function Rect([double]$x, [double]$y, [double]$w, [double]$h) {
-        New-Object System.Drawing.RectangleF (($x * $s) + $ox), (($y * $s) + $oy), ($w * $s), ($h * $s)
+        New-Object System.Drawing.RectangleF (((Zoom $x $cx) * $s) + $ox), (((Zoom $y $cy) * $s) + $oy), ($w * $zoom * $s), ($h * $zoom * $s)
     }
 
     $bodyBrush = New-Object System.Drawing.SolidBrush $Teal
@@ -54,13 +62,13 @@ function Draw-Kettle {
     $g.FillPath($bodyBrush, $spout)
 
     # Handle (left side, open C shape, touching the body)
-    $handlePen = New-Object System.Drawing.Pen $Teal, (7 * $s)
+    $handlePen = New-Object System.Drawing.Pen $Teal, (7 * $zoom * $s)
     $handlePen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $handlePen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
     $g.DrawArc($handlePen, (Rect 6 36 28 32), 85, 190)
 
     # Steam (soft, wavy - doubles as a nod to sound waves)
-    $steamPen = New-Object System.Drawing.Pen $Steam, (4.2 * $s)
+    $steamPen = New-Object System.Drawing.Pen $Steam, (4.2 * $zoom * $s)
     $steamPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $steamPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
     $g.DrawBezier($steamPen, (P 42 21), (P 38 15), (P 46 11), (P 42 4))
