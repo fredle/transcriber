@@ -58,3 +58,6 @@ node_modules/
 
 # Velopack packaging output (vpk pack)
 /Releases/
+
+# Firebase CLI local cache
+/.firebase/

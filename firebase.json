@@ -1,13 +1,26 @@
 {
-  "hosting": {
-    "target": "teeline-releases",
-    "public": "Releases",
-    "ignore": ["firebase.json", "**/.*"],
-    "headers": [
-      {
-        "source": "**",
-        "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
-      }
-    ]
-  }
+  "hosting": [
+    {
+      "target": "teeline-releases",
+      "public": "Releases",
+      "ignore": ["firebase.json", "**/.*"],
+      "headers": [
+        {
+          "source": "**",
+          "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+        }
+      ]
+    },
+    {
+      "target": "teeline-site",
+      "public": "Site",
+      "ignore": ["firebase.json", "**/.*"],
+      "headers": [
+        {
+          "source": "**/*.@(js|css|png|ico|svg)",
+          "headers": [{ "key": "Cache-Control", "value": "public, max-age=3600" }]
+        }
+      ]
+    }
+  ]
 }
