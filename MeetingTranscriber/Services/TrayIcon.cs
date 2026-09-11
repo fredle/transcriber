@@ -6,9 +6,9 @@ using System.Windows.Forms;
 namespace MeetingTranscriber.Services;
 
 /// <summary>
-/// Notification-area presence, so the app can keep watching for Teams calls
-/// with no window on screen. Closing the window hides it here rather than
-/// exiting; the process only ends via Exit on this menu.
+/// Notification-area presence, so the app can keep watching for calls with no
+/// window on screen. Closing the window hides it here rather than exiting;
+/// the process only ends via Exit on this menu.
 /// </summary>
 public sealed class TrayIcon : IDisposable
 {
@@ -36,7 +36,7 @@ public sealed class TrayIcon : IDisposable
             null, (_, _) => ShowRequested?.Invoke()) { Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold) };
         _transcribeItem = new ToolStripMenuItem("Start transcribing",
             null, (_, _) => ToggleTranscribeRequested?.Invoke());
-        _autoStartItem = new ToolStripMenuItem("Start automatically on a Teams call")
+        _autoStartItem = new ToolStripMenuItem("Start automatically on a call")
         {
             CheckOnClick = true,
             Checked = autoStart,
@@ -134,7 +134,7 @@ public sealed class TrayIcon : IDisposable
             _shownAsRecording = transcribing;
         }
 
-        var status = transcribing ? "Transcribing" : inCall ? "Teams call in progress" : "Idle";
+        var status = transcribing ? "Transcribing" : inCall ? "Call in progress" : "Idle";
         if (!string.IsNullOrWhiteSpace(meetingTitle)) status += $" - {meetingTitle}";
         // The tray tooltip is capped at 63 characters; longer text is dropped
         // entirely by the shell rather than truncated.
@@ -148,7 +148,7 @@ public sealed class TrayIcon : IDisposable
     /// requested timeout, so a custom <see cref="Toast"/> is used instead to
     /// keep notifications compact and brief. When <paramref name="onClick"/>
     /// is given, clicking it runs that instead of just reopening the window -
-    /// e.g. the "Teams call detected" prompt starts transcribing right there.
+    /// e.g. the "Call detected" prompt starts transcribing right there.
     /// </summary>
     public void Notify(string title, string message, Action? onClick = null)
     {

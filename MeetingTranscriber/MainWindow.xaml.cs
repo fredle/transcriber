@@ -45,9 +45,13 @@ public partial class MainWindow : Window
     private bool _warnedAboutTray;  // the "still running" hint is shown once
     private bool _wasInCall;        // to spot the call starting, not merely being on one
 
-    // What Teams is actually streaming through right now, per the last device
-    // check - used to drive the hints, the "Match Teams" button, and the
-    // switch notification below.
+    // The app last identified as being on a call, per the last check -
+    // needed for screenshotting its window. Null when not currently on a call.
+    private CallAppInfo? _detectedApp;
+
+    // What that app is actually streaming through right now, per the last
+    // device check - used to drive the hints, the "Match call" button, and
+    // the switch notification below.
     private string? _detectedMicId;
     private string? _detectedSpeakerId;
 
@@ -101,6 +105,8 @@ public partial class MainWindow : Window
 
         AutoStartOnCallCheck.IsChecked = _settings.AutoStartOnCall;
         AutoStopOnCallEndCheck.IsChecked = _settings.AutoStopOnCallEnd;
+        AutoDetectNonTeamsAppsCheck.IsChecked = _settings.AutoDetectNonTeamsApps;
+        CallMonitor.DiagnosticLog += msg => Log(msg);
         VersionText.Text = $"Teeline v{AppVersion.Current}";
         UpdateAccountStatus();
 
@@ -220,8 +226,8 @@ public partial class MainWindow : Window
                 _settings.Save();
                 AutoStartOnCallCheck.IsChecked = value;
                 Log(value
-                    ? "Will start transcribing automatically when a Teams call begins."
-                    : "Automatic start on a Teams call is off.");
+                    ? "Will start transcribing automatically when a call begins."
+                    : "Automatic start on a call is off.");
             }), DispatcherPriority.Background);
         };
         _tray.AutoStopChanged += value =>
@@ -233,7 +239,7 @@ public partial class MainWindow : Window
                 _settings.Save();
                 AutoStopOnCallEndCheck.IsChecked = value;
                 Log(value
-                    ? "Will stop transcribing automatically when the Teams call ends."
+                    ? "Will stop transcribing automatically when the call ends."
                     : "Automatic stop on call end is off.");
             }), DispatcherPriority.Background);
         };
@@ -369,7 +375,7 @@ public partial class MainWindow : Window
             {
                 _warnedAboutTray = true;
                 _tray?.Notify("Still running",
-                    "Teeline is in the notification area, watching for Teams calls. " +
+                    "Teeline is in the notification area, watching for calls. " +
                     "Use Exit on its menu to quit.");
             }
             return;
@@ -415,7 +421,7 @@ public partial class MainWindow : Window
     private void OnRefreshDevices(object sender, RoutedEventArgs e) => LoadDevices();
 
     /// <summary>
-    /// The user (or the "Match Teams" button) picked a different microphone.
+    /// The user (or the "Match call" button) picked a different microphone.
     /// While recording, this hot-swaps the live capture rather than waiting
     /// for the next Start; otherwise it's just remembered for next time.
     /// </summary>
@@ -481,9 +487,10 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Refreshes the "Teams using: ..." hints, warns when Teams has switched
-    /// which device it is actually streaming through mid-call, and shows the
-    /// "Match Teams" button whenever the current selection disagrees with it.
+    /// Refreshes the "Call using: ..." hints, warns when the call app has
+    /// switched which device it is actually streaming through mid-call, and
+    /// shows the "Match call" button whenever the current selection
+    /// disagrees with it.
     /// </summary>
     private void UpdateTeamsDeviceMatch()
     {
@@ -495,12 +502,12 @@ public partial class MainWindow : Window
         var commsMic = mics?.FirstOrDefault(d => d.IsDefaultComms);
         var commsSpk = speakers?.FirstOrDefault(d => d.IsDefaultComms);
 
-        MicHint.Text = detectedMic != null ? $"Teams using: {detectedMic.Name}"
-            : commsMic != null ? $"Teams using: {commsMic.Name}"
-            : "Teams device not detected";
-        SpkHint.Text = detectedSpeaker != null ? $"Teams using: {detectedSpeaker.Name}"
-            : commsSpk != null ? $"Teams using: {commsSpk.Name}"
-            : "Teams device not detected";
+        MicHint.Text = detectedMic != null ? $"Call using: {detectedMic.Name}"
+            : commsMic != null ? $"Call using: {commsMic.Name}"
+            : "Call device not detected";
+        SpkHint.Text = detectedSpeaker != null ? $"Call using: {detectedSpeaker.Name}"
+            : commsSpk != null ? $"Call using: {commsSpk.Name}"
+            : "Call device not detected";
 
         var selectedMic = MicCombo.SelectedItem as AudioDevice;
         var selectedSpeaker = SpeakerCombo.SelectedItem as AudioDevice;
@@ -512,26 +519,25 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Re-checks which device Teams is actually streaming through and reacts:
-    /// updates the hints/match button, and notifies if it switched mid-call.
-    /// Called periodically alongside the call-status check, reusing its
-    /// speaker-side detection rather than re-scanning render endpoints.
+    /// Re-checks which device the active call app is actually streaming
+    /// through and reacts: updates the hints/match button, and notifies if it
+    /// switched mid-call. Called periodically alongside the call-status check.
     /// </summary>
-    private void RefreshTeamsDeviceDetection(bool inCall, string? newSpeakerId)
+    private void RefreshCallDeviceDetection(CallAppInfo? activeApp, string? newSpeakerId)
     {
-        var newMicId = inCall ? TeamsMonitor.GetActiveMicDeviceId() : null;
+        var newMicId = activeApp.HasValue ? CallMonitor.GetMicDeviceId(activeApp.Value) : null;
 
         if (newMicId != null && _detectedMicId != null && newMicId != _detectedMicId)
         {
             var mics = MicCombo.ItemsSource as List<AudioDevice>;
             var name = mics?.FirstOrDefault(d => d.Id == newMicId)?.Name ?? "a different microphone";
-            _tray?.Notify("Teams switched microphone", $"Teams is now using \"{name}\".");
+            _tray?.Notify("Microphone changed", $"The call is now using \"{name}\".");
         }
         if (newSpeakerId != null && _detectedSpeakerId != null && newSpeakerId != _detectedSpeakerId)
         {
             var speakers = SpeakerCombo.ItemsSource as List<AudioDevice>;
             var name = speakers?.FirstOrDefault(d => d.Id == newSpeakerId)?.Name ?? "a different speaker";
-            _tray?.Notify("Teams switched speaker", $"Teams is now using \"{name}\".");
+            _tray?.Notify("Speaker changed", $"The call is now using \"{name}\".");
         }
 
         _detectedMicId = newMicId;
@@ -603,8 +609,8 @@ public partial class MainWindow : Window
         _settings.Save();
         _tray?.SetAutoStart(value);
         Log(value
-            ? "Will start transcribing automatically when a Teams call begins."
-            : "Automatic start on a Teams call is off.");
+            ? "Will start transcribing automatically when a call begins."
+            : "Automatic start on a call is off.");
     }
 
     private void OnAutoStopOnCallEndChanged(object sender, RoutedEventArgs e)
@@ -615,8 +621,19 @@ public partial class MainWindow : Window
         _settings.Save();
         _tray?.SetAutoStop(value);
         Log(value
-            ? "Will stop transcribing automatically when the Teams call ends."
+            ? "Will stop transcribing automatically when the call ends."
             : "Automatic stop on call end is off.");
+    }
+
+    private void OnAutoDetectNonTeamsAppsChanged(object sender, RoutedEventArgs e)
+    {
+        var value = AutoDetectNonTeamsAppsCheck.IsChecked == true;
+        if (_settings.AutoDetectNonTeamsApps == value) return;
+        _settings.AutoDetectNonTeamsApps = value;
+        _settings.Save();
+        Log(value
+            ? "Will also detect calls in Zoom, Slack, and browser tabs."
+            : "Back to detecting Teams calls only.");
     }
 
     // ── Recording ─────────────────────────────────────────────────────────
@@ -666,7 +683,7 @@ public partial class MainWindow : Window
 
         LiveTranscript.Document.Blocks.Clear();
 
-        var session = new RecordingSession(_backend, mic, speaker);
+        var session = new RecordingSession(_backend, mic, speaker, _settings);
         session.TranscriptLine += (spk, _, text) => Dispatcher.Invoke(() => AppendTranscript(spk, text));
         session.Log += m => Dispatcher.Invoke(() => Log(m));
         session.NewSession += (folder, title) => Dispatcher.Invoke(() =>
@@ -734,11 +751,19 @@ public partial class MainWindow : Window
 
     private void OnScreenshotMeeting(object sender, RoutedEventArgs e)
     {
-        var hwnd = TeamsMonitor.GetMeetingWindowHandle();
+        if (_detectedApp.HasValue && !CallMonitor.IsMeetingTabForeground(_detectedApp.Value))
+        {
+            Log("Screenshot skipped: switch to the meeting tab first.");
+            MessageBox.Show(this, "Switch to the meeting tab first - a background tab can't be screenshotted.",
+                "Screenshot unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var hwnd = _detectedApp.HasValue ? CallMonitor.GetMeetingWindowHandle(_detectedApp.Value) : IntPtr.Zero;
         if (hwnd == IntPtr.Zero)
         {
-            Log("Screenshot failed: could not find the Teams meeting window.");
-            MessageBox.Show(this, "Could not find the Teams meeting window.", "Screenshot failed",
+            Log("Screenshot failed: could not find the call window.");
+            MessageBox.Show(this, "Could not find the call window.", "Screenshot failed",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
@@ -819,22 +844,65 @@ public partial class MainWindow : Window
         if (++_callCheckTick < 10) return;
         _callCheckTick = 0;
 
-        var detectedSpeakerId = TeamsMonitor.GetActiveSpeakerDeviceId();
-        var inCall = detectedSpeakerId != null;
-        var title = inCall ? TeamsMonitor.GetMeetingTitle() : null;
+        var allowedApps = CallMonitor.GetAllowedProcessNames(_settings.AutoDetectNonTeamsApps);
+        var activeApps = CallMonitor.FindActiveCaptureApps(allowedApps);
+        var activeApp = CallMonitor.PickActiveApp(activeApps);
+        var inCall = activeApp != null;
+        var detectedSpeakerId = activeApp.HasValue ? CallMonitor.GetSpeakerDeviceId(activeApp.Value) : null;
+        var title = inCall ? CallMonitor.GetMeetingTitle(activeApp!.Value) : null;
+        var appLabel = activeApp.HasValue ? DisplayAppName(activeApp.Value.ProcessName) : null;
         CallStatus.Text = inCall
-            ? (title is null ? "On a Teams call" : $"On a Teams call - {title}")
-            : "Not currently on a Teams call";
+            ? (title is null ? $"On a call ({appLabel})" : $"On a call ({appLabel}) - {title}")
+            : "Not currently on a call";
         CallStatus.Foreground = inCall
             ? new SolidColorBrush((Color)Application.Current.FindResource("InCallColor"))
             : DimBrush;
 
         _tray?.Update(_session != null, inCall, title);
         HandleCallTransition(inCall, title);
-        RefreshTeamsDeviceDetection(inCall, detectedSpeakerId);
+        RefreshCallDeviceDetection(activeApp, detectedSpeakerId);
         UpdateLiveAttendees();
+        _detectedApp = activeApp;
         _wasInCall = inCall;
+        UpdateScreenshotAvailability();
     }
+
+    /// <summary>
+    /// A browser only renders whichever tab is currently visible, so if the
+    /// call moved to a background tab a screenshot would silently capture
+    /// something else entirely - disable the button rather than let that
+    /// happen. Re-checked every tick since tab focus can change anytime
+    /// while recording, unlike the recording state itself.
+    /// </summary>
+    private void UpdateScreenshotAvailability()
+    {
+        if (_session == null)
+        {
+            ScreenshotButton.IsEnabled = false;
+            ScreenshotHint.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var canScreenshot = !_detectedApp.HasValue || CallMonitor.IsMeetingTabForeground(_detectedApp.Value);
+        ScreenshotButton.IsEnabled = canScreenshot;
+        ScreenshotButton.ToolTip = canScreenshot
+            ? "Copy a screenshot of the call window to the clipboard and save it into this meeting's folder"
+            : "Switch to the meeting tab to take a screenshot";
+        // The tooltip alone is easy to miss on a disabled button (no hover
+        // affordance draws the eye to it), so spell out why in-line too.
+        ScreenshotHint.Visibility = canScreenshot ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private static string DisplayAppName(string processName) => processName switch
+    {
+        "ms-teams" or "teams" => "Teams",
+        "zoom" => "Zoom",
+        "slack" => "Slack",
+        "chrome" => "Chrome",
+        "msedge" => "Edge",
+        "firefox" => "Firefox",
+        _ => processName,
+    };
 
     /// <summary>
     /// Refreshes the live "who's on the call" panel by diffing the session's
@@ -909,7 +977,7 @@ public partial class MainWindow : Window
             if (++_speakerSilentTicks == SpeakerSilenceWarnTicks && !_speakerSilenceWarned)
             {
                 _speakerSilenceWarned = true;
-                Log("No speaker audio detected - check the selected speaker matches the one Teams is using.");
+                Log("No speaker audio detected - check the selected speaker matches the one the call is using.");
                 _tray?.Notify("No speaker audio",
                     "Nothing has been picked up from the speaker loopback for a while.");
             }
@@ -929,16 +997,17 @@ public partial class MainWindow : Window
     private void HandleCallTransition(bool inCall, string? title)
     {
         // The window locked onto as "the meeting" is stale once the call is
-        // over - the next meeting may well run in a different one.
-        if (!inCall && _wasInCall) TeamsMonitor.ResetMeetingWindow();
+        // over - the next meeting may well run in a different one, or a
+        // different app entirely.
+        if (!inCall && _wasInCall) CallMonitor.ResetMeetingWindow();
 
         if (inCall && !_wasInCall && _session == null)
         {
             if (_settings.AutoStartOnCall)
             {
-                Log("Teams call started - beginning transcription automatically.");
+                Log("Call started - beginning transcription automatically.");
                 _tray?.Notify("Transcribing", title is null
-                    ? "A Teams call started, so transcription has begun."
+                    ? "A call started, so transcription has begun."
                     : $"Transcribing \"{title}\".");
                 OnToggleRecording(this, new RoutedEventArgs());
             }
@@ -946,7 +1015,7 @@ public partial class MainWindow : Window
             {
                 // Prompting rather than recording uninvited: starting to record a
                 // meeting should stay a deliberate act.
-                _tray?.Notify("Teams call detected", title is null
+                _tray?.Notify("Call detected", title is null
                     ? "Click here to start transcribing."
                     : $"Click here to start transcribing \"{title}\".",
                     onClick: () =>
@@ -960,15 +1029,15 @@ public partial class MainWindow : Window
         {
             if (_settings.AutoStopOnCallEnd)
             {
-                Log("Teams call ended - stopping transcription automatically.");
-                _tray?.Notify("Transcribing stopped", "The Teams call ended, so transcription has stopped.");
+                Log("Call ended - stopping transcription automatically.");
+                _tray?.Notify("Transcribing stopped", "The call ended, so transcription has stopped.");
                 OnToggleRecording(this, new RoutedEventArgs());
             }
             else
             {
                 // Prompting rather than stopping uninvited - same deliberate-act
                 // stance as starting.
-                _tray?.Notify("Teams call ended", "Click here to stop transcribing.",
+                _tray?.Notify("Call ended", "Click here to stop transcribing.",
                     onClick: () =>
                     {
                         RestoreFromTray();
@@ -1632,6 +1701,7 @@ public partial class MainWindow : Window
                 "Delete failed", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
+        PushCloudEdit(meeting, () => _backend.DeleteMeetingAsync(meeting.Folder), "the delete");
 
         if (_openMeeting != null && SamePath(_openMeeting.Path, meeting.Path))
             ResetViewer(flushNotes: false);
@@ -1759,7 +1829,9 @@ public partial class MainWindow : Window
             catch (Exception ex)
             {
                 failed.Add($"{meeting.Folder}: {ex.Message}");
+                continue;
             }
+            PushCloudEdit(meeting, () => _backend.DeleteMeetingAsync(meeting.Folder), "the delete");
         }
 
         if (_openMeeting != null && selected.Any(m => SamePath(m.Path, _openMeeting.Path)))

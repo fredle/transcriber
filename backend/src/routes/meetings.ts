@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { FieldValue } from "firebase-admin/firestore";
 import { uidOf } from "../authMiddleware";
-import { meetingDoc, meetingsCollection } from "../firebase";
+import { bucket, meetingDoc, meetingsCollection } from "../firebase";
 
 const router = Router();
 
@@ -61,6 +61,32 @@ router.get("/:id", async (req, res) => {
     return;
   }
   res.json({ id: doc.id, ...doc.data() });
+});
+
+/**
+ * Deletes a meeting and everything under it - the doc itself, its lines and
+ * attendees subcollections, and any screenshots in storage - so a local
+ * delete doesn't get undone by the next cloud pull re-downloading it.
+ */
+router.delete("/:id", async (req, res) => {
+  const uid = uidOf(req);
+  const doc = meetingDoc(uid, req.params.id);
+
+  for (const sub of ["lines", "attendees"]) {
+    const refs = await doc.collection(sub).listDocuments();
+    const chunks = Array.from({ length: Math.ceil(refs.length / 450) }, (_, i) => refs.slice(i * 450, i * 450 + 450));
+    for (const chunk of chunks) {
+      const batch = doc.firestore.batch();
+      for (const ref of chunk) batch.delete(ref);
+      await batch.commit();
+    }
+  }
+
+  const [files] = await bucket.getFiles({ prefix: `users/${uid}/meetings/${req.params.id}/` });
+  await Promise.all(files.map((f) => f.delete()));
+
+  await doc.delete();
+  res.status(204).end();
 });
 
 export default router;

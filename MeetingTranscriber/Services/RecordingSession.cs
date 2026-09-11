@@ -36,6 +36,7 @@ public sealed class RecordingSession : IAsyncDisposable
     private const int AttendeeStablePolls = 2;
 
     private readonly BackendClient _backend;
+    private readonly Settings _settings;
     private AudioDevice _micDevice;
     private AudioDevice _speakerDevice;
 
@@ -82,11 +83,26 @@ public sealed class RecordingSession : IAsyncDisposable
             return _presentAttendees.Keys.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    public RecordingSession(BackendClient backend, AudioDevice mic, AudioDevice speaker)
+    public RecordingSession(BackendClient backend, AudioDevice mic, AudioDevice speaker, Settings settings)
     {
         _backend = backend;
         _micDevice = mic;
         _speakerDevice = speaker;
+        _settings = settings;
+    }
+
+    /// <summary>
+    /// Whichever recognised call app is currently active, re-resolved on
+    /// every call rather than cached, so a live toggle of "detect non-Teams
+    /// apps" and any app switch mid-call are both picked up. Shares
+    /// CallMonitor's sticky selection with the main window's own polling, so
+    /// both agree on which app is "the" call when more than one is active.
+    /// </summary>
+    private CallAppInfo? GetActiveApp()
+    {
+        var allowed = CallMonitor.GetAllowedProcessNames(_settings.AutoDetectNonTeamsApps);
+        var apps = CallMonitor.FindActiveCaptureApps(allowed);
+        return CallMonitor.PickActiveApp(apps);
     }
 
     /// <summary>Mints a fresh AssemblyAI token via the backend for one stream to connect with.</summary>
@@ -107,7 +123,8 @@ public sealed class RecordingSession : IAsyncDisposable
         var micRate = _micCapture.WaveFormat.SampleRate;
         var speakerRate = _loopbackCapture.WaveFormat.SampleRate;
 
-        _currentTitle = TeamsMonitor.GetMeetingTitle();
+        var activeApp = GetActiveApp();
+        _currentTitle = activeApp.HasValue ? CallMonitor.GetMeetingTitle(activeApp.Value) : null;
         StartNewSessionFile(_currentTitle, announce: false);
 
         _micStream = new AssemblyAiStream(MintTokenAsync, micRate, "mic");
@@ -387,7 +404,8 @@ public sealed class RecordingSession : IAsyncDisposable
     }
 
     /// <summary>
-    /// Polls Teams' participant roster and appends join/leave sightings to
+    /// Polls the call app's participant roster (Teams and Zoom; empty for
+    /// anything else) and appends join/leave sightings to
     /// the current meeting folder's attendee log. A name must survive
     /// AttendeeStablePolls consecutive polls before being recorded as
     /// joined, and an already-present attendee must be missing for that many
@@ -403,7 +421,11 @@ public sealed class RecordingSession : IAsyncDisposable
             catch (OperationCanceledException) { return; }
 
             List<string> current;
-            try { current = TeamsMonitor.GetParticipants(); }
+            try
+            {
+                var app = GetActiveApp();
+                current = app.HasValue ? CallMonitor.GetParticipants(app.Value) : new List<string>();
+            }
             catch (Exception) { continue; }
 
             string folder;
@@ -466,9 +488,10 @@ public sealed class RecordingSession : IAsyncDisposable
     }
 
     /// <summary>
-    /// Roll into a fresh recording when the Teams meeting changes, so two
+    /// Roll into a fresh recording when the meeting changes, so two
     /// back-to-back meetings do not share one transcript. Empty titles are
-    /// ignored: Teams reports nothing mid-transition and when closed.
+    /// ignored: a call app typically reports nothing mid-transition and when
+    /// closed.
     /// </summary>
     private async Task WatchMeetingTitleAsync(CancellationToken cancel)
     {
@@ -481,7 +504,11 @@ public sealed class RecordingSession : IAsyncDisposable
             catch (OperationCanceledException) { return; }
 
             string? title;
-            try { title = TeamsMonitor.GetMeetingTitle(); }
+            try
+            {
+                var app = GetActiveApp();
+                title = app.HasValue ? CallMonitor.GetMeetingTitle(app.Value) : null;
+            }
             catch (Exception) { continue; }
 
             if (string.IsNullOrWhiteSpace(title) || title == _currentTitle)

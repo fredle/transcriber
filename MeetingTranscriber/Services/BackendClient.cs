@@ -68,6 +68,12 @@ public sealed class BackendClient
         await SendAsync(HttpMethod.Patch, $"/v1/meetings/{Uri.EscapeDataString(meetingId)}", new { group }, cancel).ConfigureAwait(false);
     }
 
+    /// <summary>Deletes a meeting from the cloud so it isn't pulled back down on the next sync.</summary>
+    public async Task DeleteMeetingAsync(string meetingId, CancellationToken cancel = default)
+    {
+        await SendAsync(HttpMethod.Delete, $"/v1/meetings/{Uri.EscapeDataString(meetingId)}", null, cancel).ConfigureAwait(false);
+    }
+
     /// <summary>Pushes a meeting's RTF notes, or clears them remotely if rtfBytes is null.</summary>
     public async Task UpdateMeetingNotesAsync(string meetingId, byte[]? rtfBytes, CancellationToken cancel = default)
     {

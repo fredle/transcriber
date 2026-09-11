@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teeline — Admin</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --teal: #0e7c66;
+    --teal-dark: #0a5d4d;
+    --ink: #1c1c1c;
+    --muted: #5b6570;
+    --bg: #fbfbfa;
+    --card: #ffffff;
+    --border: #e6e6e3;
+    --danger: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px 64px; }
+  header {
+    padding: 20px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 32px;
+  }
+  .nav { display: flex; align-items: center; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; }
+  .brand svg { width: 24px; height: 24px; }
+  .who { display: flex; align-items: center; gap: 12px; font-size: 14px; color: var(--muted); }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--teal); color: #fff; padding: 9px 16px; border-radius: 8px;
+    font-weight: 600; font-size: 14px; text-decoration: none; border: none; cursor: pointer;
+  }
+  .btn:hover { background: var(--teal-dark); }
+  .btn.secondary { background: transparent; color: var(--ink); border: 1px solid var(--border); }
+  .btn.secondary:hover { border-color: var(--teal); color: var(--teal); }
+
+  #signed-out { text-align: center; padding: 120px 0; }
+  #signed-out h1 { font-size: 26px; margin: 0 0 8px; }
+  #signed-out p { color: var(--muted); margin: 0 0 28px; }
+
+  #forbidden { text-align: center; padding: 80px 0; }
+  #forbidden h1 { font-size: 22px; margin: 0 0 8px; color: var(--danger); }
+  #forbidden p { color: var(--muted); }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+  .tile {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px;
+  }
+  .tile .label { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .tile .value { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  thead th {
+    text-align: left; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.02em;
+    color: var(--muted); font-weight: 600; padding: 12px 16px; border-bottom: 1px solid var(--border);
+  }
+  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: 14.5px; vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(14, 124, 102, 0.04); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.num { text-align: right; }
+  .muted { color: var(--muted); }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: rgba(179, 38, 30, 0.1); color: var(--danger);
+  }
+  #error { color: var(--danger); padding: 16px 0; }
+  #table-wrap { overflow-x: auto; }
+  h2.section { font-size: 16px; margin: 0 0 12px; }
+
+  @media (max-width: 760px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="nav">
+      <a class="brand" href="../index.html">
+        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M20 20c-4 4-6 10-4 17M27 15c-2 3-3 7-2 11" stroke="#0e7c66" stroke-width="4" stroke-linecap="round"/>
+          <path d="M12 32c0-4 4-6 9-6h14c8 0 13 4 13 9 0 6-6 10-14 10H23c-7 0-11-4-11-9v-4z" fill="#0e7c66"/>
+          <path d="M12 30c-5 0-8 2-8 5s3 5 8 5" stroke="#0e7c66" stroke-width="4" stroke-linecap="round"/>
+          <path d="M45 31l10-4-6 9" stroke="#0e7c66" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Teeline Admin
+      </a>
+      <div class="who" id="who" hidden>
+        <span id="who-email"></span>
+        <button class="btn secondary" id="sign-out-btn">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="signed-out">
+    <h1>Teeline Admin</h1>
+    <p>Sign in with your Teeline account to view users and usage.</p>
+    <button class="btn" id="sign-in-btn">Sign in with Google</button>
+  </div>
+
+  <div id="forbidden" hidden>
+    <h1>Not authorized</h1>
+    <p>Signed in as <strong id="forbidden-email"></strong>, but this account isn't on the admin list.</p>
+    <button class="btn secondary" id="forbidden-sign-out-btn">Sign out</button>
+  </div>
+
+  <div id="content" hidden>
+    <div class="tiles">
+      <div class="tile"><div class="label">Total users</div><div class="value" id="stat-users">—</div></div>
+      <div class="tile"><div class="label">Active last 30 days</div><div class="value" id="stat-active">—</div></div>
+      <div class="tile"><div class="label">Total meetings</div><div class="value" id="stat-meetings">—</div></div>
+      <div class="tile"><div class="label">Storage used</div><div class="value" id="stat-storage">—</div></div>
+    </div>
+
+    <h2 class="section">Users</h2>
+    <div id="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>Joined</th>
+            <th>Last sign-in</th>
+            <th class="num">Meetings</th>
+            <th>Last activity</th>
+            <th class="num">Storage</th>
+          </tr>
+        </thead>
+        <tbody id="user-rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="error" hidden></div>
+</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+  import {
+    getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+  } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+  // Same Firebase Web API key/project the desktop app uses (CloudConfig.cs) -
+  // this key is meant to ship in public clients; the admin allowlist check
+  // happens server-side in the backend, not here.
+  const firebaseConfig = {
+    apiKey: "AIzaSyBTbE-7PlAaZWKeMe-iHFYipGciqZPmwj8",
+    authDomain: "leatham-sandbox.firebaseapp.com",
+    projectId: "leatham-sandbox",
+  };
+  const BACKEND_URL = "https://teeline-backend-945103730531.europe-west2.run.app";
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const provider = new GoogleAuthProvider();
+
+  const el = (id) => document.getElementById(id);
+  const show = (id, visible) => { el(id).hidden = !visible; };
+
+  el("sign-in-btn").addEventListener("click", () => signInWithPopup(auth, provider).catch((err) => showError(err.message)));
+  el("sign-out-btn").addEventListener("click", () => signOut(auth));
+  el("forbidden-sign-out-btn").addEventListener("click", () => signOut(auth));
+
+  function showError(message) {
+    el("error").textContent = message;
+    show("error", true);
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  }
+
+  function formatDate(iso) {
+    if (!iso) return "—";
+    return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  function render(overview) {
+    el("stat-users").textContent = overview.summary.totalUsers.toLocaleString();
+    el("stat-active").textContent = overview.summary.activeUsersLast30d.toLocaleString();
+    el("stat-meetings").textContent = overview.summary.totalMeetings.toLocaleString();
+    el("stat-storage").textContent = formatBytes(overview.summary.totalStorageBytes);
+
+    const rows = overview.users.map((u) => `
+      <tr>
+        <td>${u.email ?? u.uid}${u.disabled ? ' <span class="badge">disabled</span>' : ""}</td>
+        <td class="muted">${formatDate(u.createdAt)}</td>
+        <td class="muted">${formatDate(u.lastSignInAt)}</td>
+        <td class="num">${u.meetingCount.toLocaleString()}</td>
+        <td class="muted">${formatDate(u.lastMeetingAt)}</td>
+        <td class="num">${formatBytes(u.storageBytes)}</td>
+      </tr>
+    `).join("");
+    el("user-rows").innerHTML = rows || `<tr><td colspan="6" class="muted">No users yet.</td></tr>`;
+  }
+
+  onAuthStateChanged(auth, async (user) => {
+    show("signed-out", false);
+    show("forbidden", false);
+    show("content", false);
+    show("error", false);
+
+    if (!user) {
+      show("who", false);
+      show("signed-out", true);
+      return;
+    }
+
+    el("who-email").textContent = user.email ?? user.uid;
+    show("who", true);
+
+    try {
+      const idToken = await user.getIdToken();
+      const resp = await fetch(`${BACKEND_URL}/v1/admin/overview`, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+
+      if (resp.status === 403) {
+        el("forbidden-email").textContent = user.email ?? user.uid;
+        show("forbidden", true);
+        return;
+      }
+      if (!resp.ok) {
+        showError(`Request failed (${resp.status}).`);
+        return;
+      }
+
+      render(await resp.json());
+      show("content", true);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err));
+    }
+  });
+</script>
+
+</body>
+</html>

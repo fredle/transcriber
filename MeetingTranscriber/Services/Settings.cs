@@ -52,12 +52,18 @@ public sealed class Settings
     [JsonPropertyName("speakerDeviceId")] public string SpeakerDeviceId { get; set; } = "";
     /// <summary>Keep running in the notification area when the window is closed.</summary>
     [JsonPropertyName("minimiseToTray")] public bool MinimiseToTray { get; set; } = true;
-    /// <summary>Begin transcribing by itself when a Teams call starts. Off by
+    /// <summary>Begin transcribing by itself when a call starts. Off by
     /// default: recording a meeting should be a deliberate act.</summary>
     [JsonPropertyName("autoStartOnCall")] public bool AutoStartOnCall { get; set; }
-    /// <summary>Stop transcribing by itself when the Teams call ends. Off by
+    /// <summary>Stop transcribing by itself when the call ends. Off by
     /// default, matching AutoStartOnCall's deliberate-act stance.</summary>
     [JsonPropertyName("autoStopOnCallEnd")] public bool AutoStopOnCallEnd { get; set; }
+    /// <summary>Also detect calls in Zoom, Slack, and browser tabs (Chrome/
+    /// Edge/Firefox), not just Teams. Off by default: Teams-only detection
+    /// is the long-standing, well-tested behaviour, and broader detection
+    /// risks false positives from other apps that briefly open an audio
+    /// session.</summary>
+    [JsonPropertyName("autoDetectNonTeamsApps")] public bool AutoDetectNonTeamsApps { get; set; }
     /// <summary>Version last seen at startup, so a version bump (e.g. an applied auto-update) can be told apart from every other launch. Empty on a first-ever run, which is deliberately not treated as an update.</summary>
     [JsonPropertyName("lastSeenVersion")] public string LastSeenVersion { get; set; } = "";
 

@@ -52,9 +52,12 @@ gcloud run deploy teeline-backend \
   --source . \
   --region us-central1 \
   --no-allow-unauthenticated=false \
-  --set-env-vars STORAGE_BUCKET=YOUR_PROJECT_ID-teeline \
+  --set-env-vars STORAGE_BUCKET=YOUR_PROJECT_ID-teeline,ADMIN_EMAILS=you@example.com \
   --set-secrets ASSEMBLYAI_API_KEY=ASSEMBLYAI_API_KEY:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest
 ```
+
+`ADMIN_EMAILS` is a comma-separated allowlist gating the `/v1/admin/*` routes
+(defaults to `freddie@leatham.com` if unset - see `adminMiddleware.ts`).
 
 Cloud Run's own IAM stays open (`allow-unauthenticated`) because every route
 under `/v1` does its own auth via `requireAuth` (Firebase ID token
@@ -85,6 +88,7 @@ All under `/v1`, all require `Authorization: Bearer <Firebase ID token>`.
 | PATCH | `/meetings/:id` | Update title/group |
 | GET | `/meetings` | List meetings for the caller |
 | GET | `/meetings/:id` | Read one meeting |
+| DELETE | `/meetings/:id` | Delete a meeting, its lines/attendees, and its screenshots |
 | POST | `/meetings/:id/lines` | Append transcript line(s) |
 | GET | `/meetings/:id/lines` | Read a meeting's transcript |
 | POST | `/meetings/:id/attendees` | Append a join/leave event |
@@ -92,3 +96,4 @@ All under `/v1`, all require `Authorization: Bearer <Firebase ID token>`.
 | POST | `/meetings/:id/screenshots` | Get a signed upload URL |
 | GET | `/meetings/:id/screenshots` | List screenshots (signed read URLs) |
 | POST | `/meetings/:id/ask` | Ask a question about the transcript (Claude) |
+| GET | `/admin/overview` | Users + usage summary (requires an `ADMIN_EMAILS` account) |
