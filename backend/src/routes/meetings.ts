@@ -1,9 +1,16 @@
 import { Router } from "express";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { uidOf } from "../authMiddleware";
 import { bucket, meetingDoc, meetingsCollection } from "../firebase";
 
 const router = Router();
+
+// updatedAt is a Firestore Timestamp server-side; give clients a stable ISO
+// string instead, so they can compare it against what they last synced.
+function serialize(data: FirebaseFirestore.DocumentData): FirebaseFirestore.DocumentData {
+  const { updatedAt, ...rest } = data;
+  return { ...rest, updatedAt: updatedAt instanceof Timestamp ? updatedAt.toDate().toISOString() : updatedAt };
+}
 
 router.post("/", async (req, res) => {
   const uid = uidOf(req);
@@ -47,7 +54,7 @@ router.get("/", async (req, res) => {
   // notes can be large-ish and isn't needed for the list view - only for GET /:id.
   res.json(
     snap.docs.map((d) => {
-      const { notes: _notes, ...rest } = d.data();
+      const { notes: _notes, ...rest } = serialize(d.data());
       return { id: d.id, ...rest };
     }),
   );
@@ -60,7 +67,7 @@ router.get("/:id", async (req, res) => {
     res.status(404).json({ error: "Not found." });
     return;
   }
-  res.json({ id: doc.id, ...doc.data() });
+  res.json({ id: doc.id, ...serialize(doc.data()!) });
 });
 
 /**

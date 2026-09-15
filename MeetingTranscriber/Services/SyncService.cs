@@ -17,7 +17,12 @@ namespace MeetingTranscriber.Services;
 /// A folder that was created by a pull carries a marker file, distinguishing
 /// it from a folder this machine recorded itself - only marked folders are
 /// ever overwritten by a later pull, so a locally-recorded meeting (which is
-/// already the source of truth and is uploading live) is never touched.
+/// already the source of truth and is uploading live) is never touched. The
+/// marker also records the remote updatedAt we last synced, so a meeting
+/// that hasn't changed since (the common case - most meetings are finished
+/// and static) is skipped instead of re-reading its whole lines/attendees
+/// subcollections on every 60-second poll, which is what made Firestore
+/// read costs balloon with the number of synced meetings.
 /// </summary>
 public sealed class SyncService
 {
@@ -35,8 +40,9 @@ public sealed class SyncService
     /// <summary>
     /// Fetches the account's cloud meeting list and, for each one, downloads
     /// it if it's missing locally, or refreshes it if it was previously
-    /// pulled and may have picked up new lines since (e.g. still being
-    /// recorded on the other machine).
+    /// pulled and its remote updatedAt has moved on since (e.g. still being
+    /// recorded on the other machine). A meeting whose updatedAt matches what
+    /// we last synced is left alone - no lines/attendees re-read.
     /// </summary>
     public async Task PullAsync(CancellationToken cancel = default)
     {
@@ -60,10 +66,16 @@ public sealed class SyncService
             {
                 var folder = MeetingStore.FindMeetingFolder(meeting.Id);
                 if (folder == null)
+                {
                     await DownloadMeetingAsync(meeting, cancel).ConfigureAwait(false);
-                else if (File.Exists(Path.Combine(folder, SyncMarkerFileName)))
-                    await RefreshMeetingAsync(folder, meeting, cancel).ConfigureAwait(false);
-                // else: this machine recorded it - already the source, leave it alone.
+                }
+                else
+                {
+                    var markerPath = Path.Combine(folder, SyncMarkerFileName);
+                    if (File.Exists(markerPath) && ReadSyncedUpdatedAt(markerPath) != meeting.UpdatedAt)
+                        await RefreshMeetingAsync(folder, markerPath, meeting, cancel).ConfigureAwait(false);
+                    // else: unchanged since the last pull, or this machine recorded it - nothing to do.
+                }
             }
             catch (Exception ex)
             {
@@ -82,22 +94,51 @@ public sealed class SyncService
         var folder = Path.Combine(baseDir, meeting.Id);
         if (Directory.Exists(folder)) return;   // raced with another pull or a local recording
         Directory.CreateDirectory(folder);
-        File.WriteAllText(Path.Combine(folder, SyncMarkerFileName), "");
+        var markerPath = Path.Combine(folder, SyncMarkerFileName);
+        File.WriteAllText(markerPath, "");
 
         await WriteTranscriptAsync(folder, meeting, cancel).ConfigureAwait(false);
         await WriteAttendeesAsync(folder, meeting.Id, cancel).ConfigureAwait(false);
         await DownloadScreenshotsAsync(folder, meeting.Id, cancel).ConfigureAwait(false);
         await WriteNotesAsync(folder, meeting.Id, cancel).ConfigureAwait(false);
+        WriteSyncedUpdatedAt(markerPath, meeting.UpdatedAt);
         _log?.Invoke($"Synced meeting '{meeting.Title}' from the cloud.");
     }
 
-    private async Task RefreshMeetingAsync(string folder, RemoteMeeting meeting, CancellationToken cancel)
+    private async Task RefreshMeetingAsync(string folder, string markerPath, RemoteMeeting meeting, CancellationToken cancel)
     {
         folder = FollowGroupMove(folder, meeting);
+        markerPath = Path.Combine(folder, SyncMarkerFileName);
         await WriteTranscriptAsync(folder, meeting, cancel).ConfigureAwait(false);
         await WriteAttendeesAsync(folder, meeting.Id, cancel).ConfigureAwait(false);
         await DownloadScreenshotsAsync(folder, meeting.Id, cancel).ConfigureAwait(false);
         await WriteNotesAsync(folder, meeting.Id, cancel).ConfigureAwait(false);
+        WriteSyncedUpdatedAt(markerPath, meeting.UpdatedAt);
+    }
+
+    private static string? ReadSyncedUpdatedAt(string markerPath)
+    {
+        try
+        {
+            var text = File.ReadAllText(markerPath);
+            return string.IsNullOrEmpty(text) ? null : text;
+        }
+        catch (IOException)
+        {
+            return null;   // treat as unknown - falls through to a refresh, which is safe
+        }
+    }
+
+    private static void WriteSyncedUpdatedAt(string markerPath, string? updatedAt)
+    {
+        try
+        {
+            File.WriteAllText(markerPath, updatedAt ?? "");
+        }
+        catch (IOException)
+        {
+            // best-effort - worst case the next pull refreshes this meeting again
+        }
     }
 
     /// <summary>

@@ -233,6 +233,8 @@ public sealed class RemoteMeeting
     [JsonPropertyName("group")] public string Group { get; set; } = "";
     /// <summary>RTF notes, base64-encoded. Only populated by GetMeetingAsync, not the list.</summary>
     [JsonPropertyName("notes")] public string? Notes { get; set; }
+    /// <summary>ISO timestamp of the last server-side write to this meeting (doc, lines, or attendees).</summary>
+    [JsonPropertyName("updatedAt")] public string? UpdatedAt { get; set; }
 }
 
 public sealed class RemoteLine
