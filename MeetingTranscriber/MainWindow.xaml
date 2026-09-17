@@ -541,6 +541,9 @@
                         <TextBlock x:Name="WhatsNewLink" Text="What's new" Margin="12,0,0,0" VerticalAlignment="Center"
                                    FontSize="12" Foreground="{StaticResource Dim}" TextDecorations="Underline"
                                    Cursor="Hand" MouseLeftButtonUp="OnShowWhatsNew"/>
+                        <TextBlock x:Name="CheckForUpdatesLink" Text="Check for updates" Margin="12,0,0,0" VerticalAlignment="Center"
+                                   FontSize="12" Foreground="{StaticResource Dim}" TextDecorations="Underline"
+                                   Cursor="Hand" MouseLeftButtonUp="OnCheckForUpdates"/>
                     </StackPanel>
                 </Border>
             </StackPanel>

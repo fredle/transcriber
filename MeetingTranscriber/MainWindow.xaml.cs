@@ -249,6 +249,7 @@ public partial class MainWindow : Window
             Close();
         };
         _tray.UpdateRequested += OnUpdateRequested;
+        _tray.CheckForUpdatesRequested += () => _ = CheckForUpdatesAsync(announceResult: true);
     }
 
     /// <summary>
@@ -256,22 +257,50 @@ public partial class MainWindow : Window
     /// applies it here - only flags it as ready (tray item + toast) - since
     /// applying restarts the process and a meeting could be recording.
     /// Best-effort: a dev build (not installed via the Velopack installer)
-    /// or a network hiccup just means nothing happens, silently.
+    /// or a network hiccup just means nothing happens, silently - unless
+    /// <paramref name="announceResult"/> is set, for a check the user asked
+    /// for directly (tray menu / settings link), where silence would just
+    /// look broken.
     /// </summary>
-    private async System.Threading.Tasks.Task CheckForUpdatesAsync()
+    private async System.Threading.Tasks.Task CheckForUpdatesAsync(bool announceResult = false)
     {
         try
         {
-            if (!await _updates.CheckAndDownloadAsync()) return;
+            if (!await _updates.CheckAndDownloadAsync())
+            {
+                if (announceResult)
+                {
+                    MessageBox.Show(this,
+                        _updates.IsInstalled ? "You're on the latest version." : "Updates aren't available for this build.",
+                        "Check for updates", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                return;
+            }
             Log($"Update v{_updates.PendingVersion} downloaded - restart Teeline to apply it.");
             _tray?.ShowUpdateAvailable(_updates.PendingVersion!);
-            _tray?.Notify("Update ready", $"Teeline v{_updates.PendingVersion} downloaded. Click to restart and update.", OnUpdateRequested);
+            if (announceResult)
+            {
+                MessageBox.Show(this, $"Teeline v{_updates.PendingVersion} downloaded. Restart Teeline to apply it.",
+                    "Update available", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                _tray?.Notify("Update ready", $"Teeline v{_updates.PendingVersion} downloaded. Click to restart and update.", OnUpdateRequested);
+            }
         }
         catch (Exception ex)
         {
             Log($"Update check failed: {ex.Message}");
+            if (announceResult)
+            {
+                MessageBox.Show(this, $"Couldn't check for updates:\n\n{ex.Message}",
+                    "Check for updates", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
     }
+
+    private void OnCheckForUpdates(object sender, System.Windows.Input.MouseButtonEventArgs e) =>
+        _ = CheckForUpdatesAsync(announceResult: true);
 
     private void OnUpdateRequested()
     {
