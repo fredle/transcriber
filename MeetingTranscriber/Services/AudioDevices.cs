@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 
 namespace MeetingTranscriber.Services;
@@ -61,5 +62,28 @@ public static class AudioDevices
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Turns a WASAPI failure into something a user can act on. NAudio
+    /// surfaces most capture problems as a bare COMException whose Message
+    /// is just an HRESULT (e.g. "Exception from HRESULT: 0x8889000A"), which
+    /// is meaningless to see in a dialog - translate the common AUDCLNT_*
+    /// codes we're actually likely to hit, and fall back to the raw message
+    /// (with the code still visible) for anything else.
+    /// </summary>
+    public static string DescribeCaptureFailure(Exception ex, string role, string deviceName)
+    {
+        var reason = (ex as COMException)?.HResult switch
+        {
+            unchecked((int)0x88890004) => "it was disconnected, or its settings changed",
+            unchecked((int)0x8889000A) => "another app currently has exclusive control of it",
+            unchecked((int)0x88890008) => "it doesn't support the audio format that was requested",
+            unchecked((int)0x88890017) => "the Windows Audio service isn't running",
+            _ => null,
+        };
+        return reason != null
+            ? $"Couldn't open the {role} '{deviceName}' - {reason}."
+            : $"Couldn't open the {role} '{deviceName}': {ex.Message}";
     }
 }

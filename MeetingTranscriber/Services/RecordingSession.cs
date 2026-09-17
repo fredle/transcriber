@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -115,8 +116,24 @@ public sealed class RecordingSession : IAsyncDisposable
         var speakerDevice = AudioDevices.GetById(_speakerDevice.Id)
             ?? throw new InvalidOperationException($"Speaker '{_speakerDevice.Name}' is unavailable.");
 
-        _micCapture = new WasapiCapture(micDevice);
-        _loopbackCapture = new WasapiLoopbackCapture(speakerDevice);
+        try
+        {
+            _micCapture = new WasapiCapture(micDevice);
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException(
+                AudioDevices.DescribeCaptureFailure(ex, "microphone", _micDevice.Name), ex);
+        }
+        try
+        {
+            _loopbackCapture = new WasapiLoopbackCapture(speakerDevice);
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException(
+                AudioDevices.DescribeCaptureFailure(ex, "speaker", _speakerDevice.Name), ex);
+        }
 
         // AssemblyAI accepts 8k-96k, so stream at each device's native rate
         // rather than resampling and losing quality on the way.
@@ -151,8 +168,24 @@ public sealed class RecordingSession : IAsyncDisposable
         loopbackCapture.DataAvailable += (_, e) =>
             Forward(e, loopbackCapture.WaveFormat, speakerStream, ref _speakerLevel);
 
-        _micCapture.StartRecording();
-        _loopbackCapture.StartRecording();
+        try
+        {
+            _micCapture.StartRecording();
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException(
+                AudioDevices.DescribeCaptureFailure(ex, "microphone", _micDevice.Name), ex);
+        }
+        try
+        {
+            _loopbackCapture.StartRecording();
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException(
+                AudioDevices.DescribeCaptureFailure(ex, "speaker", _speakerDevice.Name), ex);
+        }
 
         _watcherCts = new CancellationTokenSource();
         _ = Task.Run(() => WatchMeetingTitleAsync(_watcherCts.Token));
@@ -176,7 +209,16 @@ public sealed class RecordingSession : IAsyncDisposable
         var mmDevice = AudioDevices.GetById(device.Id)
             ?? throw new InvalidOperationException($"Microphone '{device.Name}' is unavailable.");
 
-        var capture = new WasapiCapture(mmDevice);
+        WasapiCapture capture;
+        try
+        {
+            capture = new WasapiCapture(mmDevice);
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException(
+                AudioDevices.DescribeCaptureFailure(ex, "microphone", device.Name), ex);
+        }
         var rate = capture.WaveFormat.SampleRate;
         var stream = new AssemblyAiStream(MintTokenAsync, rate, "mic");
         stream.FinalTurn += (text, label, s, e) => WriteLine("ME", label, text, s, e);
@@ -192,7 +234,15 @@ public sealed class RecordingSession : IAsyncDisposable
         _micStream = stream;
         _micDevice = device;
         _micLevel = 0f;
-        capture.StartRecording();
+        try
+        {
+            capture.StartRecording();
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException(
+                AudioDevices.DescribeCaptureFailure(ex, "microphone", device.Name), ex);
+        }
 
         oldCapture?.Dispose();
         if (oldStream != null) await oldStream.DisposeAsync().ConfigureAwait(false);
@@ -206,7 +256,16 @@ public sealed class RecordingSession : IAsyncDisposable
         var mmDevice = AudioDevices.GetById(device.Id)
             ?? throw new InvalidOperationException($"Speaker '{device.Name}' is unavailable.");
 
-        var capture = new WasapiLoopbackCapture(mmDevice);
+        WasapiLoopbackCapture capture;
+        try
+        {
+            capture = new WasapiLoopbackCapture(mmDevice);
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException(
+                AudioDevices.DescribeCaptureFailure(ex, "speaker", device.Name), ex);
+        }
         var rate = capture.WaveFormat.SampleRate;
         var stream = new AssemblyAiStream(MintTokenAsync, rate, "speaker");
         stream.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
@@ -222,7 +281,15 @@ public sealed class RecordingSession : IAsyncDisposable
         _speakerStream = stream;
         _speakerDevice = device;
         _speakerLevel = 0f;
-        capture.StartRecording();
+        try
+        {
+            capture.StartRecording();
+        }
+        catch (COMException ex)
+        {
+            throw new InvalidOperationException(
+                AudioDevices.DescribeCaptureFailure(ex, "speaker", device.Name), ex);
+        }
 
         oldCapture?.Dispose();
         if (oldStream != null) await oldStream.DisposeAsync().ConfigureAwait(false);
