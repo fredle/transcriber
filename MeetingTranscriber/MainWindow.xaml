@@ -6,6 +6,10 @@
         Background="{StaticResource WindowBg}"
         TextOptions.TextFormattingMode="Display">
 
+    <Window.TaskbarItemInfo>
+        <TaskbarItemInfo x:Name="TaskbarInfo"/>
+    </Window.TaskbarItemInfo>
+
     <TabControl x:Name="MainTabControl" Background="{StaticResource WindowBg}" BorderThickness="0" Margin="14,10,14,14">
 
         <!-- ── Transcribe ─────────────────────────────────────────────── -->

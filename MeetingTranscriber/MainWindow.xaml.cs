@@ -855,6 +855,24 @@ public partial class MainWindow : Window
         NotesBox.IsEnabled = recording;
         NotesHint.Visibility = recording ? Visibility.Collapsed : Visibility.Visible;
         if (!recording) NotesBox.Document.Blocks.Clear();
+
+        // Mirrors the tray icon's recording badge (see TrayIcon.BuildRecordingIcon)
+        // on the taskbar button, so the state is visible even when the window
+        // is minimised or behind other apps and the tray icon isn't in view.
+        TaskbarInfo.Overlay = recording ? RecordingOverlay : null;
+        TaskbarInfo.Description = recording ? "Transcribing" : null;
+    }
+
+    private static ImageSource? _recordingOverlay;
+    private static ImageSource RecordingOverlay => _recordingOverlay ??= BuildRecordingOverlay();
+
+    private static ImageSource BuildRecordingOverlay()
+    {
+        var geometry = new EllipseGeometry(new Point(8, 8), 6.5, 6.5);
+        var drawing = new GeometryDrawing(Brushes.Red, new Pen(Brushes.White, 1.5), geometry);
+        var image = new DrawingImage(drawing);
+        image.Freeze();
+        return image;
     }
 
     // ── Periodic UI refresh ───────────────────────────────────────────────
