@@ -868,9 +868,15 @@ public partial class MainWindow : Window
 
     private static ImageSource BuildRecordingOverlay()
     {
-        var geometry = new EllipseGeometry(new Point(8, 8), 6.5, 6.5);
-        var drawing = new GeometryDrawing(Brushes.Red, new Pen(Brushes.White, 1.5), geometry);
-        var image = new DrawingImage(drawing);
+        // A transparent full-size backdrop keeps the image's bounds (and so
+        // the dot's rendered size within the overlay slot) fixed regardless
+        // of how small the dot itself is drawn - without it, the image
+        // bounds would just be the dot's own bounds and it would always
+        // fill the slot no matter what radius is given below.
+        var group = new DrawingGroup();
+        group.Children.Add(new GeometryDrawing(Brushes.Transparent, null, new RectangleGeometry(new Rect(0, 0, 16, 16))));
+        group.Children.Add(new GeometryDrawing(Brushes.Red, new Pen(Brushes.White, 1), new EllipseGeometry(new Point(8, 8), 3.5, 3.5)));
+        var image = new DrawingImage(group);
         image.Freeze();
         return image;
     }
