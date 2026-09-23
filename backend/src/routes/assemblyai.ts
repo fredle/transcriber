@@ -19,8 +19,18 @@ router.post("/token", async (req, res) => {
   );
 
   if (!resp.ok) {
-    console.error(`AssemblyAI token mint failed for uid=${uid}: ${resp.status}`);
-    res.status(502).json({ error: "Could not mint a transcription token." });
+    const detail = await resp.text().catch(() => "");
+    console.error(`AssemblyAI token mint failed for uid=${uid}: ${resp.status} ${detail}`);
+
+    // A 401/403 means our AssemblyAI account key is missing or invalid - an
+    // operator problem the user can't fix by retrying. Anything else (5xx,
+    // network hiccup) is more likely transient on AssemblyAI's side.
+    const message =
+      resp.status === 401 || resp.status === 403
+        ? "Transcription is temporarily unavailable (service misconfigured). Please try again later or contact support."
+        : "Transcription service is temporarily unavailable. Please check your connection and try again.";
+
+    res.status(502).json({ error: message });
     return;
   }
 

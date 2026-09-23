@@ -106,6 +106,14 @@ public partial class MainWindow : Window
         AutoStartOnCallCheck.IsChecked = _settings.AutoStartOnCall;
         AutoStopOnCallEndCheck.IsChecked = _settings.AutoStopOnCallEnd;
         AutoDetectNonTeamsAppsCheck.IsChecked = _settings.AutoDetectNonTeamsApps;
+        foreach (ComboBoxItem item in SpeechModelCombo.Items)
+        {
+            if ((string)item.Tag == _settings.SpeechModel) { SpeechModelCombo.SelectedItem = item; break; }
+        }
+        SpeechModelCombo.SelectedItem ??= SpeechModelCombo.Items[0];
+        DiarizationCheck.IsChecked = _settings.DiarizationEnabled;
+        BatchModeCheck.IsChecked = _settings.BatchMode;
+        MergeStreamsCheck.IsChecked = _settings.MergeStreams;
         CallMonitor.DiagnosticLog += msg => Log(msg);
         VersionText.Text = $"Teeline v{AppVersion.Current}";
         UpdateAccountStatus();
@@ -663,6 +671,49 @@ public partial class MainWindow : Window
         Log(value
             ? "Will also detect calls in Zoom, Slack, and browser tabs."
             : "Back to detecting Teams calls only.");
+    }
+
+    private void OnSpeechModelChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SpeechModelCombo.SelectedItem is not ComboBoxItem item) return;
+        var value = (string)item.Tag;
+        if (_settings.SpeechModel == value) return;
+        _settings.SpeechModel = value;
+        _settings.Save();
+        Log($"Speech model set to {item.Content} for the next recording.");
+    }
+
+    private void OnDiarizationChanged(object sender, RoutedEventArgs e)
+    {
+        var value = DiarizationCheck.IsChecked == true;
+        if (_settings.DiarizationEnabled == value) return;
+        _settings.DiarizationEnabled = value;
+        _settings.Save();
+        Log(value
+            ? "Speaker labelling enabled for the next recording."
+            : "Speaker labelling disabled for the next recording.");
+    }
+
+    private void OnBatchModeChanged(object sender, RoutedEventArgs e)
+    {
+        var value = BatchModeCheck.IsChecked == true;
+        if (_settings.BatchMode == value) return;
+        _settings.BatchMode = value;
+        _settings.Save();
+        Log(value
+            ? "Batch mode enabled: the next recording will transcribe shortly after each pause instead of live."
+            : "Batch mode disabled: the next recording will transcribe live again.");
+    }
+
+    private void OnMergeStreamsChanged(object sender, RoutedEventArgs e)
+    {
+        var value = MergeStreamsCheck.IsChecked == true;
+        if (_settings.MergeStreams == value) return;
+        _settings.MergeStreams = value;
+        _settings.Save();
+        Log(value
+            ? "Merged mic/speaker streams enabled for the next recording: ME/OTHER attribution will be lost."
+            : "Merged streams disabled: the next recording will use separate mic/speaker connections again.");
     }
 
     // ── Recording ─────────────────────────────────────────────────────────

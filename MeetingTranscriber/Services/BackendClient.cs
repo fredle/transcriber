@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -149,6 +150,26 @@ public sealed class BackendClient
         return await resp.Content.ReadFromJsonAsync<RemoteMeeting>(cancellationToken: cancel).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Uploads a pause-segmented chunk of audio (as a WAV file) and waits for
+    /// AssemblyAI's async transcription of it, via the backend so the raw
+    /// AssemblyAI key never reaches this process. Can take several seconds to
+    /// ~45s to return, matching AssemblyAI's typical async turnaround.
+    /// </summary>
+    public async Task<List<BatchUtterance>> TranscribeBatchAsync(byte[] wavBytes, string speechModel, bool diarization, CancellationToken cancel = default)
+    {
+        var path = $"/v1/assemblyai/transcribe-batch?speechModel={Uri.EscapeDataString(speechModel)}&diarization={(diarization ? "true" : "false")}";
+        var resp = await SendWithContentAsync(HttpMethod.Post, path, () =>
+        {
+            var content = new ByteArrayContent(wavBytes);
+            content.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+            return content;
+        }, cancel).ConfigureAwait(false);
+        var body = await resp.Content.ReadFromJsonAsync<BatchTranscribeResponse>(cancellationToken: cancel).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Backend returned no batch transcript.");
+        return body.Utterances;
+    }
+
     public async Task<List<RemoteLine>> GetLinesAsync(string meetingId, CancellationToken cancel = default)
     {
         var resp = await SendAsync(HttpMethod.Get, $"/v1/meetings/{Uri.EscapeDataString(meetingId)}/lines", null, cancel).ConfigureAwait(false);
@@ -178,7 +199,16 @@ public sealed class BackendClient
         return await resp.Content.ReadAsByteArrayAsync(cancel).ConfigureAwait(false);
     }
 
-    private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, object? body, CancellationToken cancel)
+    private Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, object? body, CancellationToken cancel) =>
+        SendWithContentAsync(method, path, () => body == null ? null : JsonContent.Create(body), cancel);
+
+    /// <summary>
+    /// Takes a content factory rather than a materialised HttpContent: each
+    /// retry attempt (after a 401 forces a fresh token) needs its own
+    /// HttpContent instance, since the previous attempt's request/content was
+    /// already disposed when its `using` block ended.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendWithContentAsync(HttpMethod method, string path, Func<HttpContent?> contentFactory, CancellationToken cancel)
     {
         var attempt = 0;
         while (true)
@@ -187,7 +217,7 @@ public sealed class BackendClient
             var token = await _auth.GetIdTokenAsync(cancel).ConfigureAwait(false);
             using var request = new HttpRequestMessage(method, $"{BaseUrl}{path}")
             {
-                Content = body == null ? null : JsonContent.Create(body),
+                Content = contentFactory(),
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -197,7 +227,7 @@ public sealed class BackendClient
                 if (!response.IsSuccessStatusCode)
                 {
                     var text = await response.Content.ReadAsStringAsync(cancel).ConfigureAwait(false);
-                    throw new InvalidOperationException($"Backend request failed ({(int)response.StatusCode}): {text}");
+                    throw new InvalidOperationException($"{ExtractErrorMessage(text)} ({(int)response.StatusCode})");
                 }
                 return response;
             }
@@ -205,6 +235,21 @@ public sealed class BackendClient
             response.Dispose();
             _auth.InvalidateCachedToken();
         }
+    }
+
+    /// <summary>Pulls the {"error": "..."} message out of a backend error body, falling back to the raw text if it's not that shape.</summary>
+    private static string ExtractErrorMessage(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String)
+                return error.GetString()!;
+        }
+        catch (JsonException)
+        {
+        }
+        return string.IsNullOrWhiteSpace(body) ? "Backend request failed." : body;
     }
 
     private sealed class TokenResponse
@@ -222,6 +267,19 @@ public sealed class BackendClient
     {
         [JsonPropertyName("answer")] public string Answer { get; set; } = "";
     }
+
+    private sealed class BatchTranscribeResponse
+    {
+        [JsonPropertyName("utterances")] public List<BatchUtterance> Utterances { get; set; } = new();
+    }
+}
+
+public sealed class BatchUtterance
+{
+    [JsonPropertyName("text")] public string Text { get; set; } = "";
+    [JsonPropertyName("speaker")] public string? Speaker { get; set; }
+    [JsonPropertyName("startMs")] public int StartMs { get; set; }
+    [JsonPropertyName("endMs")] public int EndMs { get; set; }
 }
 
 public sealed class RemoteMeeting

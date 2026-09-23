@@ -67,6 +67,15 @@ public sealed class Settings
     /// <summary>Version last seen at startup, so a version bump (e.g. an applied auto-update) can be told apart from every other launch. Empty on a first-ever run, which is deliberately not treated as an update.</summary>
     [JsonPropertyName("lastSeenVersion")] public string LastSeenVersion { get; set; } = "";
 
+    /// <summary>AssemblyAI speech model id, used for both realtime and batch transcription. See AssemblyAiStream/AssemblyAiBatchStream for the values each mode accepts.</summary>
+    [JsonPropertyName("speechModel")] public string SpeechModel { get; set; } = "universal-streaming-english";
+    /// <summary>Label who's speaking (AssemblyAI's speaker_labels). On by default; the transcript loses per-remote-speaker attribution without it.</summary>
+    [JsonPropertyName("diarizationEnabled")] public bool DiarizationEnabled { get; set; } = true;
+    /// <summary>Transcribe in pause-segmented batches via AssemblyAI's async API instead of keeping a realtime socket open - substantially cheaper, at the cost of a few seconds of delay per turn.</summary>
+    [JsonPropertyName("batchMode")] public bool BatchMode { get; set; }
+    /// <summary>Mix mic and speaker audio into a single stream/connection instead of two. Roughly halves transcription cost, but "ME" vs "OTHER" attribution is lost - speakers are labelled purely from AssemblyAI's own diarization.</summary>
+    [JsonPropertyName("mergeStreams")] public bool MergeStreams { get; set; }
+
     /// <summary>
     /// %AppData%\Teeline, migrating an older %AppData%\Kettle or, before
     /// that, %AppData%\MeetingTranscriber folder so an existing API

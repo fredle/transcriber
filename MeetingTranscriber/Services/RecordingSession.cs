@@ -16,6 +16,20 @@ namespace MeetingTranscriber.Services;
 /// The mic is written as [ME] and the speaker loopback as [OTHER]; diarised
 /// speaker labels are only meaningful on the speaker channel, which mixes the
 /// remote participants.
+///
+/// Settings.MergeStreams changes this: mic and speaker audio are mixed into
+/// one connection/segment stream instead of two (roughly half the
+/// transcription cost), but that means AssemblyAI can no longer tell "me"
+/// apart from the remote participants by which socket audio arrived on -
+/// every merged turn is written as [OTHER], with the local user showing up as
+/// just another diarised speaker label alongside everyone else.
+///
+/// Settings.BatchMode swaps the realtime socket (AssemblyAiStream) for
+/// pause-segmented async transcription (AssemblyAiBatchStream) - cheaper, at
+/// the cost of a few seconds' delay per turn instead of live captions. Which
+/// stream implementation and merge topology to use is decided once, at
+/// StartAsync, from the settings at that moment; changing the settings mid-
+/// recording only takes effect on the next recording.
 /// </summary>
 public sealed class RecordingSession : IAsyncDisposable
 {
@@ -43,8 +57,15 @@ public sealed class RecordingSession : IAsyncDisposable
 
     private WasapiCapture? _micCapture;
     private WasapiLoopbackCapture? _loopbackCapture;
-    private AssemblyAiStream? _micStream;
-    private AssemblyAiStream? _speakerStream;
+    private IAudioStream? _micStream;
+    private IAudioStream? _speakerStream;
+    private AudioMixer? _mixer;
+
+    // Snapshotted from Settings at StartAsync - see the class doc comment.
+    private bool _merged;
+    private bool _batchMode;
+    private string _speechModel = "universal-streaming-english";
+    private bool _diarization = true;
 
     private readonly object _writerLock = new();
     private StreamWriter? _writer;
@@ -109,6 +130,12 @@ public sealed class RecordingSession : IAsyncDisposable
     /// <summary>Mints a fresh AssemblyAI token via the backend for one stream to connect with.</summary>
     private Task<string> MintTokenAsync(CancellationToken cancel) => _backend.MintAssemblyAiTokenAsync(cancel);
 
+    /// <summary>Builds a realtime or batch stream per the settings snapshotted at StartAsync.</summary>
+    private IAudioStream CreateStream(int sampleRate, string label) =>
+        _batchMode
+            ? new AssemblyAiBatchStream(_backend, sampleRate, label, _speechModel, _diarization)
+            : new AssemblyAiStream(MintTokenAsync, sampleRate, label, _speechModel, _diarization);
+
     public async Task StartAsync()
     {
         var micDevice = AudioDevices.GetById(_micDevice.Id)
@@ -136,7 +163,8 @@ public sealed class RecordingSession : IAsyncDisposable
         }
 
         // AssemblyAI accepts 8k-96k, so stream at each device's native rate
-        // rather than resampling and losing quality on the way.
+        // rather than resampling and losing quality on the way (except when
+        // merging, which has to pick one common rate to mix at - see below).
         var micRate = _micCapture.WaveFormat.SampleRate;
         var speakerRate = _loopbackCapture.WaveFormat.SampleRate;
 
@@ -144,29 +172,58 @@ public sealed class RecordingSession : IAsyncDisposable
         _currentTitle = activeApp.HasValue ? CallMonitor.GetMeetingTitle(activeApp.Value) : null;
         StartNewSessionFile(_currentTitle, announce: false);
 
-        _micStream = new AssemblyAiStream(MintTokenAsync, micRate, "mic");
-        _speakerStream = new AssemblyAiStream(MintTokenAsync, speakerRate, "speaker");
-        _micStream.FinalTurn += (text, label, s, e) => WriteLine("ME", label, text, s, e);
-        _speakerStream.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
-        _micStream.Error += m => Log?.Invoke(m);
-        _speakerStream.Error += m => Log?.Invoke(m);
+        _merged = _settings.MergeStreams;
+        _batchMode = _settings.BatchMode;
+        _speechModel = _settings.SpeechModel;
+        _diarization = _settings.DiarizationEnabled;
 
-        await _micStream.StartAsync().ConfigureAwait(false);
-        await _speakerStream.StartAsync().ConfigureAwait(false);
-
-        // Bound to the local capture/stream rather than the field: once a
-        // live device swap can repoint the fields mid-flight (see
-        // ChangeMicDeviceAsync/ChangeSpeakerDeviceAsync below), a callback
-        // still in flight from the outgoing capture must keep feeding the
-        // stream it was actually opened against, not whatever is current.
         var micCapture = _micCapture;
-        var micStream = _micStream;
-        micCapture.DataAvailable += (_, e) =>
-            Forward(e, micCapture.WaveFormat, micStream, ref _micLevel);
         var loopbackCapture = _loopbackCapture;
-        var speakerStream = _speakerStream;
-        loopbackCapture.DataAvailable += (_, e) =>
-            Forward(e, loopbackCapture.WaveFormat, speakerStream, ref _speakerLevel);
+
+        if (_merged)
+        {
+            // Every merged turn is written as [OTHER]: once mixed, the
+            // pipeline can no longer tell "me" apart from remote
+            // participants by which socket the audio arrived on, so the
+            // local user shows up as just another diarised speaker label.
+            var merged = CreateStream(micRate, "meeting");
+            merged.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
+            merged.Error += m => Log?.Invoke(m);
+            await merged.StartAsync().ConfigureAwait(false);
+            _speakerStream = merged;
+            _micStream = null;
+
+            var mixer = new AudioMixer(micRate, (mixed, count) => merged.Feed(mixed, count));
+            _mixer = mixer;
+            micCapture.DataAvailable += (_, e) =>
+                ForwardToMixer(e, micCapture.WaveFormat, mixer, toMic: true, ref _micLevel);
+            loopbackCapture.DataAvailable += (_, e) =>
+                ForwardToMixer(e, loopbackCapture.WaveFormat, mixer, toMic: false, ref _speakerLevel);
+        }
+        else
+        {
+            _micStream = CreateStream(micRate, "mic");
+            _speakerStream = CreateStream(speakerRate, "speaker");
+            _micStream.FinalTurn += (text, label, s, e) => WriteLine("ME", label, text, s, e);
+            _speakerStream.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
+            _micStream.Error += m => Log?.Invoke(m);
+            _speakerStream.Error += m => Log?.Invoke(m);
+
+            await _micStream.StartAsync().ConfigureAwait(false);
+            await _speakerStream.StartAsync().ConfigureAwait(false);
+
+            // Bound to the local capture/stream rather than the field: once a
+            // live device swap can repoint the fields mid-flight (see
+            // ChangeMicDeviceAsync/ChangeSpeakerDeviceAsync below), a callback
+            // still in flight from the outgoing capture must keep feeding the
+            // stream it was actually opened against, not whatever is current.
+            var micStream = _micStream;
+            micCapture.DataAvailable += (_, e) =>
+                Forward(e, micCapture.WaveFormat, micStream, ref _micLevel);
+            var speakerStream = _speakerStream;
+            loopbackCapture.DataAvailable += (_, e) =>
+                Forward(e, loopbackCapture.WaveFormat, speakerStream, ref _speakerLevel);
+        }
 
         try
         {
@@ -220,11 +277,24 @@ public sealed class RecordingSession : IAsyncDisposable
                 AudioDevices.DescribeCaptureFailure(ex, "microphone", device.Name), ex);
         }
         var rate = capture.WaveFormat.SampleRate;
-        var stream = new AssemblyAiStream(MintTokenAsync, rate, "mic");
-        stream.FinalTurn += (text, label, s, e) => WriteLine("ME", label, text, s, e);
-        stream.Error += m => Log?.Invoke(m);
-        await stream.StartAsync().ConfigureAwait(false);
-        capture.DataAvailable += (_, e) => Forward(e, capture.WaveFormat, stream, ref _micLevel);
+
+        IAudioStream? stream = null;
+        if (_merged)
+        {
+            // No per-channel connection to reopen - the mixer just needs
+            // pointing at the new capture; FeedMic resamples to whatever
+            // rate the mixer was created at.
+            var mixer = _mixer!;
+            capture.DataAvailable += (_, e) => ForwardToMixer(e, capture.WaveFormat, mixer, toMic: true, ref _micLevel);
+        }
+        else
+        {
+            stream = CreateStream(rate, "mic");
+            stream.FinalTurn += (text, label, s, e) => WriteLine("ME", label, text, s, e);
+            stream.Error += m => Log?.Invoke(m);
+            await stream.StartAsync().ConfigureAwait(false);
+            capture.DataAvailable += (_, e) => Forward(e, capture.WaveFormat, stream, ref _micLevel);
+        }
 
         var oldCapture = _micCapture;
         var oldStream = _micStream;
@@ -267,14 +337,27 @@ public sealed class RecordingSession : IAsyncDisposable
                 AudioDevices.DescribeCaptureFailure(ex, "speaker", device.Name), ex);
         }
         var rate = capture.WaveFormat.SampleRate;
-        var stream = new AssemblyAiStream(MintTokenAsync, rate, "speaker");
-        stream.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
-        stream.Error += m => Log?.Invoke(m);
-        await stream.StartAsync().ConfigureAwait(false);
-        capture.DataAvailable += (_, e) => Forward(e, capture.WaveFormat, stream, ref _speakerLevel);
+
+        IAudioStream? stream;
+        if (_merged)
+        {
+            // The merged connection lives in _speakerStream (see StartAsync);
+            // only the capture and its mixer feed are being swapped here.
+            stream = _speakerStream;
+            var mixer = _mixer!;
+            capture.DataAvailable += (_, e) => ForwardToMixer(e, capture.WaveFormat, mixer, toMic: false, ref _speakerLevel);
+        }
+        else
+        {
+            stream = CreateStream(rate, "speaker");
+            stream.FinalTurn += (text, label, s, e) => WriteLine("OTHER", label, text, s, e);
+            stream.Error += m => Log?.Invoke(m);
+            await stream.StartAsync().ConfigureAwait(false);
+            capture.DataAvailable += (_, e) => Forward(e, capture.WaveFormat, stream, ref _speakerLevel);
+        }
 
         var oldCapture = _loopbackCapture;
-        var oldStream = _speakerStream;
+        var oldStream = _merged ? null : _speakerStream;
         try { oldCapture?.StopRecording(); } catch (Exception) { }
 
         _loopbackCapture = capture;
@@ -302,13 +385,32 @@ public sealed class RecordingSession : IAsyncDisposable
     /// WASAPI hands us 32-bit float, usually stereo; AssemblyAI wants mono
     /// PCM16, so take the first channel and scale.
     /// </summary>
-    private void Forward(WaveInEventArgs e, WaveFormat format, AssemblyAiStream? stream, ref float level)
+    private void Forward(WaveInEventArgs e, WaveFormat format, IAudioStream? stream, ref float level)
     {
-        if (stream == null || e.BytesRecorded == 0) return;
+        if (stream == null) return;
+        var mono = ConvertToPcm16Mono(e, format, out var monoLevel);
+        if (mono == null) return;
+        level = monoLevel;
+        stream.Feed(mono, mono.Length);
+    }
+
+    /// <summary>Merged-mode counterpart of <see cref="Forward"/>: feeds the mixer's per-device queue instead of a stream directly.</summary>
+    private void ForwardToMixer(WaveInEventArgs e, WaveFormat format, AudioMixer mixer, bool toMic, ref float level)
+    {
+        var mono = ConvertToPcm16Mono(e, format, out var monoLevel);
+        if (mono == null) return;
+        level = monoLevel;
+        if (toMic) mixer.FeedMic(mono, mono.Length, format.SampleRate);
+        else mixer.FeedSpeaker(mono, mono.Length, format.SampleRate);
+    }
+
+    private static byte[]? ConvertToPcm16Mono(WaveInEventArgs e, WaveFormat format, out float level)
+    {
+        level = 0f;
+        if (e.BytesRecorded == 0) return null;
 
         var channels = Math.Max(1, format.Channels);
         byte[] mono;
-        int monoBytes;
         double sumSquares = 0;
         int sampleCount = 0;
 
@@ -316,7 +418,6 @@ public sealed class RecordingSession : IAsyncDisposable
         {
             var frames = e.BytesRecorded / (4 * channels);
             mono = new byte[frames * 2];
-            monoBytes = mono.Length;
             for (var i = 0; i < frames; i++)
             {
                 var sample = BitConverter.ToSingle(e.Buffer, (i * channels) * 4);
@@ -332,7 +433,6 @@ public sealed class RecordingSession : IAsyncDisposable
         {
             var frames = e.BytesRecorded / (2 * channels);
             mono = new byte[frames * 2];
-            monoBytes = mono.Length;
             for (var i = 0; i < frames; i++)
             {
                 var pcm = BitConverter.ToInt16(e.Buffer, (i * channels) * 2);
@@ -345,11 +445,11 @@ public sealed class RecordingSession : IAsyncDisposable
         }
         else
         {
-            return;   // unexpected format; nothing sensible to send
+            return null;   // unexpected format; nothing sensible to send
         }
 
         level = sampleCount > 0 ? (float)Math.Sqrt(sumSquares / sampleCount) : 0f;
-        stream.Feed(mono, monoBytes);
+        return mono;
     }
 
     private void WriteLine(string speaker, string? label, string text, int startMs, int endMs)
@@ -642,6 +742,7 @@ public sealed class RecordingSession : IAsyncDisposable
         _loopbackCapture?.Dispose();
         if (_micStream != null) await _micStream.DisposeAsync().ConfigureAwait(false);
         if (_speakerStream != null) await _speakerStream.DisposeAsync().ConfigureAwait(false);
+        _mixer?.Dispose();
         _watcherCts?.Dispose();
     }
 }

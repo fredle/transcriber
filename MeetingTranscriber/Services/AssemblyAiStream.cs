@@ -11,10 +11,16 @@ namespace MeetingTranscriber.Services;
 /// One realtime AssemblyAI connection for one audio channel (mic or speaker).
 ///
 /// Talks to the v3 streaming endpoint directly over a WebSocket rather than
-/// through the SDK, because the parameters we need (universal-3-5-pro with
-/// diarization) map cleanly onto documented query-string options and this
+/// through the SDK, because the parameters we need (universal-streaming-english
+/// with diarization) map cleanly onto documented query-string options and this
 /// keeps the session lifecycle — in particular the mandatory Terminate — in
 /// plain sight.
+///
+/// Uses the base "universal-streaming-english" model rather than
+/// universal-3-5-pro: roughly a third of the per-hour cost, at some loss of
+/// entity/accuracy quality. AssemblyAI's docs don't explicitly confirm
+/// speaker_labels behaves the same on this tier, so verify diarization
+/// quality against real meetings after this change.
 ///
 /// The account's AssemblyAI key never lives in this process: the caller
 /// supplies a delegate that fetches a short-lived, single-use token from the
@@ -22,7 +28,7 @@ namespace MeetingTranscriber.Services;
 /// socket connects with that token in the query string rather than the raw
 /// key in an Authorization header.
 /// </summary>
-public sealed class AssemblyAiStream : IAsyncDisposable
+public sealed class AssemblyAiStream : IAudioStream
 {
     // Realtime requires 50-1000 ms of audio per frame, sent no faster than
     // real time. Capture buffers are far smaller, so they are batched up.
@@ -31,6 +37,8 @@ public sealed class AssemblyAiStream : IAsyncDisposable
     private readonly Func<CancellationToken, Task<string>> _getToken;
     private readonly int _sampleRate;
     private readonly string _label;
+    private readonly string _speechModel;
+    private readonly bool _diarization;
     private readonly int _bytesPerSend;
 
     private readonly ClientWebSocket _socket = new();
@@ -46,11 +54,18 @@ public sealed class AssemblyAiStream : IAsyncDisposable
     /// <summary>Fires on transport or API errors, for surfacing in the log.</summary>
     public event Action<string>? Error;
 
-    public AssemblyAiStream(Func<CancellationToken, Task<string>> getToken, int sampleRate, string label)
+    public AssemblyAiStream(
+        Func<CancellationToken, Task<string>> getToken,
+        int sampleRate,
+        string label,
+        string speechModel = "universal-streaming-english",
+        bool diarization = true)
     {
         _getToken = getToken;
         _sampleRate = sampleRate;
         _label = label;
+        _speechModel = speechModel;
+        _diarization = diarization;
         // 16-bit mono
         _bytesPerSend = (int)(sampleRate * (SendChunkMs / 1000.0)) * 2;
     }
@@ -62,9 +77,9 @@ public sealed class AssemblyAiStream : IAsyncDisposable
             "wss://streaming.assemblyai.com/v3/ws" +
             $"?sample_rate={_sampleRate}" +
             "&encoding=pcm_s16le" +
-            "&speech_model=universal-3-5-pro" +
+            $"&speech_model={Uri.EscapeDataString(_speechModel)}" +
             "&mode=balanced" +
-            "&speaker_labels=true" +
+            $"&speaker_labels={(_diarization ? "true" : "false")}" +
             $"&token={Uri.EscapeDataString(token)}");
 
         await _socket.ConnectAsync(uri, cancel).ConfigureAwait(false);
